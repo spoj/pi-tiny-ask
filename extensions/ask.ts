@@ -95,7 +95,7 @@ function normalizePayload(payload: unknown, model: Model<Api>): unknown {
 export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "ask",
-    label: "Ask",
+    label: "Tiny Ask",
     description: "Ask a configured multimodal model to inspect local image, audio, video, or PDF files. Model must be an exact provider/model ID. Images work with image-capable models; PDFs work with Google, Anthropic, and OpenAI Responses adapters; audio and video require Google.",
     promptSnippet: "Ask another configured model to inspect local media files",
     promptGuidelines: [

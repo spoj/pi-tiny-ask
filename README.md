@@ -1,4 +1,4 @@
-# pi-tiny-multimodal
+# pi-tiny-ask
 
 A tiny pi extension that adds an `ask` tool for sending local media to another configured model.
 
@@ -17,5 +17,5 @@ Images work with image-capable adapters. PDFs work with Google, Anthropic, and O
 ## Install locally
 
 ```bash
-pi install /absolute/path/to/pi-tiny-multimodal
+pi install github.com/spoj/pi-tiny-ask
 ```
