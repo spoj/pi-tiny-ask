@@ -112,6 +112,33 @@ async function callAnthropic(request: Request): Promise<string> {
     .trim();
 }
 
+async function callOpenRouterImage(request: Request): Promise<void> {
+  const headers = new Headers(request.headers);
+  headers.set("authorization", `Bearer ${request.apiKey}`);
+  headers.set("content-type", "application/json");
+  const response = await fetch(`${(request.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/$/, "")}/images`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: request.modelId,
+      prompt: request.prompt,
+      n: 1,
+      ...(request.files.length ? {
+        input_references: request.files.map((file) => ({
+          type: "image_url",
+          image_url: { url: `data:${file.mimeType};base64,${file.data.toString("base64")}` },
+        })),
+      } : {}),
+    }),
+    signal: request.signal,
+  });
+  if (!response.ok) throw new Error(`Image provider returned ${response.status} ${response.statusText}: ${await response.text()}`);
+  const payload = await response.json() as { data?: Array<{ b64_json?: string }> };
+  const data = payload.data?.[0]?.b64_json;
+  if (!data) throw new Error("Image provider returned no image");
+  await saveImage(request.output!, Buffer.from(data, "base64"));
+}
+
 async function callOpenAI(request: Request): Promise<string | undefined> {
   const client = new OpenAI({
     apiKey: request.apiKey ?? "pi-auth",
@@ -248,7 +275,7 @@ export default function (pi: ExtensionAPI): void {
     promptSnippet: "Inspect local media or generate an image with a configured model",
     promptGuidelines: [
       "Use ask when a task needs image, audio, video, or PDF understanding that would benefit from another model.",
-      "To generate an image, set output to a workspace-relative path and use an OpenAI, Google, or Google Vertex image model.",
+      "To generate an image, set output to a workspace-relative path and use an OpenAI, OpenRouter, Google, or Google Vertex image model.",
     ],
     parameters: Type.Object({
       model: Type.String({ description: "Exact provider/model ID" }),
@@ -290,7 +317,9 @@ export default function (pi: ExtensionAPI): void {
           kind: media[1],
         };
       }));
-      const api = output ? generationApi(providerId, model, provider.getModels()) : model!.api;
+      const api = output && providerId === "openrouter"
+        ? "openai-completions"
+        : output ? generationApi(providerId, model, provider.getModels()) : model!.api;
       if (output) assertKinds(files, ["image"], api);
 
       const headers: Record<string, string> = {};
@@ -316,7 +345,8 @@ export default function (pi: ExtensionAPI): void {
       };
 
       let answer: string | undefined;
-      if (request.api === "anthropic-messages") answer = await callAnthropic(request);
+      if (request.output && providerId === "openrouter") await callOpenRouterImage(request);
+      else if (request.api === "anthropic-messages") answer = await callAnthropic(request);
       else if (request.api === "google-generative-ai" || request.api === "google-vertex") {
         answer = await callGoogle(request);
       } else if (request.api === "openai-completions" || request.api === "openai-responses" ||
