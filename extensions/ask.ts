@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Api, Context, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
@@ -92,6 +92,13 @@ async function generateImage(
   if (providerId !== "google" && providerId !== "openai" && providerId !== "openrouter") {
     throw new Error("Image generation supports google, openai, and openrouter providers");
   }
+  if (path.isAbsolute(outputPath)) throw new Error("output must be workspace-relative");
+  const workspace = path.resolve(ctx.cwd);
+  const output = path.resolve(workspace, outputPath);
+  const relative = path.relative(workspace, output);
+  if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+    throw new Error("output must stay within the workspace");
+  }
 
   const resolved = await ctx.modelRegistry.getProviderAuth(providerId) as RequestAuth | undefined;
   if (!resolved) throw new Error(`Provider has no configured authentication: ${providerId}`);
@@ -151,7 +158,7 @@ async function generateImage(
     signal,
   }));
 
-  let data: string | undefined;
+  let data: Buffer | undefined;
   if (providerId === "google") {
     const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
     for (const candidateValue of candidates) {
@@ -159,16 +166,23 @@ async function generateImage(
       if (!Array.isArray(parts)) continue;
       for (const partValue of parts) {
         const inlineData = record(record(partValue)?.inlineData ?? record(partValue)?.inline_data);
-        if (typeof inlineData?.data === "string") data = inlineData.data;
+        if (typeof inlineData?.data === "string") data = Buffer.from(inlineData.data, "base64");
       }
     }
   } else {
     const results = Array.isArray(payload.data) ? payload.data : [];
     const image = record(results[0]);
-    if (typeof image?.b64_json === "string") data = image.b64_json;
+    if (typeof image?.b64_json === "string") {
+      data = Buffer.from(image.b64_json, "base64");
+    } else if (typeof image?.url === "string") {
+      const response = await fetch(image.url, { signal });
+      if (!response.ok) throw new Error(`Image provider returned ${response.status} ${response.statusText}`);
+      data = Buffer.from(await response.arrayBuffer());
+    }
   }
   if (!data) throw new Error("Image provider returned no image");
-  await writeFile(path.resolve(ctx.cwd, outputPath), Buffer.from(data, "base64"));
+  await mkdir(path.dirname(output), { recursive: true });
+  await writeFile(output, data);
 }
 
 function normalizePayload(payload: unknown, model: Model<Api>): unknown {
