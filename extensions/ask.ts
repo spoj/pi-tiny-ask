@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { GoogleGenAI, Modality } from "@google/genai";
 import type { Api, Context, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
@@ -89,8 +90,8 @@ async function generateImage(
   if (slash < 1) throw new Error("model must use provider/model format");
   const providerId = spec.slice(0, slash);
   const modelId = spec.slice(slash + 1);
-  if (providerId !== "google" && providerId !== "openai" && providerId !== "openrouter") {
-    throw new Error("Image generation supports google, openai, and openrouter providers");
+  if (providerId !== "google" && providerId !== "google-vertex" && providerId !== "openai" && providerId !== "openrouter") {
+    throw new Error("Image generation supports google, google-vertex, openai, and openrouter providers");
   }
   if (path.isAbsolute(outputPath)) throw new Error("output must be workspace-relative");
   const workspace = path.resolve(ctx.cwd);
@@ -121,6 +122,41 @@ async function generateImage(
 
   let url: string;
   let body: Record<string, unknown>;
+  if (providerId === "google-vertex") {
+    const model = resolveModel(ctx, spec);
+    if (model.api !== "google-vertex") throw new Error(`${spec} is not a Vertex AI model`);
+    const apiKey = resolved.auth.apiKey && resolved.auth.apiKey !== "gcp-vertex-credentials" ? resolved.auth.apiKey : undefined;
+    const location = process.env.GOOGLE_CLOUD_LOCATION;
+    const project = process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT;
+    if (!apiKey && !location) throw new Error("Vertex image generation requires GOOGLE_CLOUD_LOCATION");
+    if (!apiKey && !project) throw new Error("Vertex image generation requires GOOGLE_CLOUD_PROJECT or GCLOUD_PROJECT");
+    const baseUrl = !apiKey && (resolved.auth.baseUrl ?? provider?.baseUrl)?.replace("{location}", location!);
+    const client = new GoogleGenAI({
+      vertexai: true,
+      ...(project ? { project } : {}),
+      ...(location ? { location } : {}),
+      ...(apiKey ? { apiKey } : {}),
+      apiVersion: "v1",
+      ...(baseUrl ? { httpOptions: { baseUrl } } : {}),
+    });
+    const response = await client.models.generateContent({
+      model: modelId,
+      contents: [{ role: "user", parts: [
+        { text: prompt },
+        ...images.map((image) => ({ inlineData: { mimeType: image.mimeType, data: image.data } })),
+      ] }],
+      config: { responseModalities: [Modality.TEXT, Modality.IMAGE], abortSignal: signal },
+    });
+    let data: Buffer | undefined;
+    for (const part of response.candidates?.[0]?.content?.parts ?? []) {
+      if (part.inlineData?.data) data = Buffer.from(part.inlineData.data, "base64");
+    }
+    if (!data || data.length === 0) throw new Error("Image provider returned no image");
+    await mkdir(path.dirname(output), { recursive: true });
+    await writeFile(output, data);
+    return;
+  }
+
   if (providerId === "google") {
     const baseUrl = resolved.auth.baseUrl ?? provider?.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta";
     url = `${baseUrl.replace(/\/$/, "")}/models/${encodeURIComponent(modelId)}:generateContent`;
@@ -227,7 +263,7 @@ export default function (pi: ExtensionAPI): void {
     promptSnippet: "Inspect media or generate an image with a configured model",
     promptGuidelines: [
       "Use ask when a task needs image, audio, video, or PDF understanding that would benefit from another model.",
-      "To generate an image, set output to a workspace-relative image path and use a Google, OpenAI, or OpenRouter image model.",
+      "To generate an image, set output to a workspace-relative image path and use a Google, Google Vertex, OpenAI, or OpenRouter image model.",
     ],
     parameters: Type.Object({
       model: Type.String({ description: "Exact provider/model ID" }),

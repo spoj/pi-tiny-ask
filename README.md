@@ -14,7 +14,7 @@ Then ask pi to inspect an image, PDF, audio file, or video. The tool accepts exa
 
 Images work with image-capable adapters. PDFs work with Google, Anthropic, and OpenAI Responses adapters. Audio and video are limited to Google adapters. Files are sent inline, so this extension is intended for small files.
 
-The tool can also generate an image with pi's configured Google, OpenAI, or OpenRouter authentication. Set `output` to the workspace-relative path where the image should be saved. Examples of model IDs are `google/gemini-3.1-flash-image`, `openai/gpt-image-2`, and `openrouter/google/gemini-3.1-flash-image`. Google and OpenRouter accept optional reference images through `files`; native OpenAI generation is currently text-to-image only.
+The tool can also generate an image with pi's configured Google, Google Vertex, OpenAI, or OpenRouter authentication. Set `output` to the workspace-relative path where the image should be saved. Examples of model IDs are `google/gemini-3.1-flash-image`, `google-vertex/gemini-3.1-flash-image`, `openai/gpt-image-2`, and `openrouter/google/gemini-3.1-flash-image`. Google, Google Vertex, and OpenRouter accept optional reference images through `files`; native OpenAI generation is currently text-to-image only. Vertex generation uses `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) and `GOOGLE_CLOUD_LOCATION` with ADC, or a configured `GOOGLE_CLOUD_API_KEY`.
 
 ## Install locally
 
