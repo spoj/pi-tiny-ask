@@ -12,9 +12,9 @@ pi -e .
 
 Then ask pi to inspect an image, PDF, audio file, or video. The tool accepts exact `provider/model` IDs and paths relative to pi's working directory.
 
-Images work with image-capable adapters. PDFs work with Google, Anthropic, and OpenAI Responses adapters. Audio and video are limited to Google adapters. Files are sent inline, so this extension is intended for small files.
+Each call sends one prompt and all files in one native SDK request. Routing follows the selected model's pi API format: Anthropic Messages accepts images and PDFs, OpenAI Responses accepts images and PDFs, OpenAI Chat Completions accepts images, and Google AI or Vertex accepts images, PDFs, audio, and video. Files are sent inline, so this extension is intended for small files.
 
-The tool can also generate an image with pi's configured Google, Google Vertex, OpenAI, or OpenRouter authentication. Set `output` to the workspace-relative path where the image should be saved. Examples of model IDs are `google/gemini-3.1-flash-image`, `google-vertex/gemini-3.1-flash-image`, `openai/gpt-image-2`, and `openrouter/google/gemini-3.1-flash-image`. Google, Google Vertex, and OpenRouter accept optional reference images through `files`; native OpenAI generation is currently text-to-image only. Vertex generation uses `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) and `GOOGLE_CLOUD_LOCATION` with ADC, or a configured `GOOGLE_CLOUD_API_KEY`.
+The tool can also generate an image with pi's configured Google, Google Vertex, or OpenAI authentication. Set `output` to the workspace-relative path where the image should be saved. Examples are `google/gemini-3.1-flash-image`, `google-vertex/gemini-3.1-flash-image`, and `openai/gpt-image-2`. All three accept optional reference images through `files`; OpenAI uses its image edit API when references are present. Vertex generation supports a configured API key or ADC with project and location.
 
 ## Install locally
 
