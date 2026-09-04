@@ -180,7 +180,7 @@ async function generateImage(
       data = Buffer.from(await response.arrayBuffer());
     }
   }
-  if (!data) throw new Error("Image provider returned no image");
+  if (!data || data.length === 0) throw new Error("Image provider returned no image");
   await mkdir(path.dirname(output), { recursive: true });
   await writeFile(output, data);
 }
