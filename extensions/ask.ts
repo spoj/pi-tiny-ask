@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Api, Context, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
@@ -58,6 +58,119 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+type RequestAuth = {
+  auth: {
+    apiKey?: string;
+    headers?: Record<string, string | null>;
+    baseUrl?: string;
+  };
+};
+
+async function readJson(response: Response): Promise<Record<string, unknown>> {
+  const text = await response.text();
+  const payload = record(JSON.parse(text));
+  if (!response.ok) {
+    const error = record(payload?.error);
+    throw new Error(typeof error?.message === "string" ? error.message : `${response.status} ${response.statusText}`);
+  }
+  if (!payload) throw new Error("Image provider returned an invalid response");
+  return payload;
+}
+
+async function generateImage(
+  ctx: ExtensionContext,
+  spec: string,
+  prompt: string,
+  files: string[],
+  outputPath: string,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const slash = spec.indexOf("/");
+  if (slash < 1) throw new Error("model must use provider/model format");
+  const providerId = spec.slice(0, slash);
+  const modelId = spec.slice(slash + 1);
+  if (providerId !== "google" && providerId !== "openai" && providerId !== "openrouter") {
+    throw new Error("Image generation supports google, openai, and openrouter providers");
+  }
+
+  const resolved = await ctx.modelRegistry.getProviderAuth(providerId) as RequestAuth | undefined;
+  if (!resolved) throw new Error(`Provider has no configured authentication: ${providerId}`);
+  const provider = ctx.modelRegistry.getProvider(providerId);
+  const headers = new Headers({ "content-type": "application/json" });
+  for (const [name, value] of Object.entries({ ...provider?.headers, ...resolved.auth.headers })) {
+    if (value !== null) headers.set(name, value);
+  }
+  if (resolved.auth.apiKey) {
+    if (providerId === "google") headers.set("x-goog-api-key", resolved.auth.apiKey);
+    else headers.set("authorization", `Bearer ${resolved.auth.apiKey}`);
+  }
+
+  const images = await Promise.all(files.map(async (file): Promise<ImageContent> => {
+    const filePath = path.resolve(ctx.cwd, file.replace(/^@/, ""));
+    const media = MEDIA[path.extname(filePath).toLowerCase() as keyof typeof MEDIA];
+    if (!media || media[1] !== "image") throw new Error(`Image generation input must be an image: ${file}`);
+    return { type: "image", data: (await readFile(filePath)).toString("base64"), mimeType: media[0] };
+  }));
+
+  let url: string;
+  let body: Record<string, unknown>;
+  if (providerId === "google") {
+    const baseUrl = resolved.auth.baseUrl ?? provider?.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta";
+    url = `${baseUrl.replace(/\/$/, "")}/models/${encodeURIComponent(modelId)}:generateContent`;
+    body = {
+      contents: [{ role: "user", parts: [
+        { text: prompt },
+        ...images.map((image) => ({ inlineData: { mimeType: image.mimeType, data: image.data } })),
+      ] }],
+      generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
+    };
+  } else {
+    if (providerId === "openai" && images.length) {
+      throw new Error("Native OpenAI image generation does not accept reference files through ask; use Google or OpenRouter");
+    }
+    const baseUrl = resolved.auth.baseUrl ?? provider?.baseUrl ??
+      (providerId === "openrouter" ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1");
+    url = `${baseUrl.replace(/\/$/, "")}/${providerId === "openrouter" ? "images" : "images/generations"}`;
+    body = {
+      model: modelId,
+      prompt,
+      n: 1,
+      ...(providerId === "openrouter" && images.length ? {
+        input_references: images.map((image) => ({
+          type: "image_url",
+          image_url: { url: `data:${image.mimeType};base64,${image.data}` },
+        })),
+      } : {}),
+    };
+  }
+
+  const payload = await readJson(await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal,
+  }));
+
+  let data: string | undefined;
+  if (providerId === "google") {
+    const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+    for (const candidateValue of candidates) {
+      const parts = record(record(candidateValue)?.content)?.parts;
+      if (!Array.isArray(parts)) continue;
+      for (const partValue of parts) {
+        const inlineData = record(record(partValue)?.inlineData ?? record(partValue)?.inline_data);
+        if (typeof inlineData?.data === "string") data = inlineData.data;
+      }
+    }
+  } else {
+    const results = Array.isArray(payload.data) ? payload.data : [];
+    const image = record(results[0]);
+    if (typeof image?.b64_json === "string") data = image.b64_json;
+  }
+  if (!data) throw new Error("Image provider returned no image");
+  await writeFile(path.resolve(ctx.cwd, outputPath), Buffer.from(data, "base64"));
+}
+
 function normalizePayload(payload: unknown, model: Model<Api>): unknown {
   const body = record(payload);
 
@@ -96,22 +209,32 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "ask",
     label: "Tiny Ask",
-    description: "Ask a configured multimodal model to inspect local image, audio, video, or PDF files. Model must be an exact provider/model ID. Images work with image-capable models; PDFs work with Google, Anthropic, and OpenAI Responses adapters; audio and video require Google.",
-    promptSnippet: "Ask another configured model to inspect local media files",
+    description: "Ask a configured model to inspect local media or generate an image. Set output to generate with Google, OpenAI, or OpenRouter and save the returned image.",
+    promptSnippet: "Inspect media or generate an image with a configured model",
     promptGuidelines: [
-      "Use ask when a task needs image, audio, video, or PDF understanding that would benefit from a multimodal model or a second opinion.",
-      "When using ask, choose an exact configured provider/model ID; prefer a Google Gemini model for audio or video, and a strong image- or PDF-capable model for images or PDFs.",
+      "Use ask when a task needs image, audio, video, or PDF understanding that would benefit from another model.",
+      "To generate an image, set output to a workspace-relative image path and use a Google, OpenAI, or OpenRouter image model.",
     ],
     parameters: Type.Object({
       model: Type.String({ description: "Exact provider/model ID" }),
       prompt: Type.String({ description: "What the other model should do" }),
-      files: Type.Array(Type.String(), { description: "Media paths relative to the workspace" }),
+      files: Type.Optional(Type.Array(Type.String(), { description: "Media paths relative to the workspace" })),
+      output: Type.Optional(Type.String({ description: "Workspace-relative path for a generated image" })),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const files = params.files ?? [];
+      if (params.output) {
+        await generateImage(ctx, params.model, params.prompt, files, params.output, signal);
+        return {
+          content: [{ type: "text", text: `Image saved to ${params.output}` }],
+          details: { model: params.model, files, output: params.output },
+        };
+      }
+
       const model = resolveModel(ctx, params.model);
       const content: Array<TextContent | ImageContent> = [{ type: "text", text: params.prompt }];
 
-      for (const file of params.files) {
+      for (const file of files) {
         const filePath = path.resolve(ctx.cwd, file.replace(/^@/, ""));
         const media = MEDIA[path.extname(filePath).toLowerCase() as keyof typeof MEDIA];
         if (!media) throw new Error(`Unsupported file: ${file}`);
@@ -146,7 +269,7 @@ export default function (pi: ExtensionAPI): void {
 
       return {
         content: [{ type: "text", text: answer }],
-        details: { model: params.model, files: params.files },
+        details: { model: params.model, files },
         usage: response.usage,
       };
     },
