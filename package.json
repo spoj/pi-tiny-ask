@@ -4,8 +4,10 @@
   "private": true,
   "type": "module",
   "keywords": ["pi-package"],
+  "dependencies": {
+    "@google/genai": "^1.52.0"
+  },
   "peerDependencies": {
-    "@google/genai": "^1.52.0",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"

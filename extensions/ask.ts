@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { GoogleGenAI, Modality } from "@google/genai";
+import { GoogleGenAI, Modality, ResourceScope } from "@google/genai";
 import type { Api, Context, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
@@ -65,6 +65,7 @@ type RequestAuth = {
     headers?: Record<string, string | null>;
     baseUrl?: string;
   };
+  env?: Record<string, string>;
 };
 
 async function readJson(response: Response): Promise<Record<string, unknown>> {
@@ -110,7 +111,9 @@ async function generateImage(
   }
   if (resolved.auth.apiKey) {
     if (providerId === "google") headers.set("x-goog-api-key", resolved.auth.apiKey);
-    else headers.set("authorization", `Bearer ${resolved.auth.apiKey}`);
+    if (providerId === "openai" || providerId === "openrouter") {
+      headers.set("authorization", `Bearer ${resolved.auth.apiKey}`);
+    }
   }
 
   const images = await Promise.all(files.map(async (file): Promise<ImageContent> => {
@@ -120,24 +123,29 @@ async function generateImage(
     return { type: "image", data: (await readFile(filePath)).toString("base64"), mimeType: media[0] };
   }));
 
-  let url: string;
-  let body: Record<string, unknown>;
   if (providerId === "google-vertex") {
-    const model = resolveModel(ctx, spec);
-    if (model.api !== "google-vertex") throw new Error(`${spec} is not a Vertex AI model`);
+    const env = { ...process.env, ...resolved.env };
     const apiKey = resolved.auth.apiKey && resolved.auth.apiKey !== "gcp-vertex-credentials" ? resolved.auth.apiKey : undefined;
-    const location = process.env.GOOGLE_CLOUD_LOCATION;
-    const project = process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT;
-    if (!apiKey && !location) throw new Error("Vertex image generation requires GOOGLE_CLOUD_LOCATION");
+    const project = env.GOOGLE_CLOUD_PROJECT ?? env.GCLOUD_PROJECT;
+    const location = env.GOOGLE_CLOUD_LOCATION;
     if (!apiKey && !project) throw new Error("Vertex image generation requires GOOGLE_CLOUD_PROJECT or GCLOUD_PROJECT");
-    const baseUrl = !apiKey && (resolved.auth.baseUrl ?? provider?.baseUrl)?.replace("{location}", location!);
+    if (!apiKey && !location) throw new Error("Vertex image generation requires GOOGLE_CLOUD_LOCATION");
+    const configuredBaseUrl = resolved.auth.baseUrl ?? provider?.baseUrl;
+    const baseUrl = configuredBaseUrl?.includes("{location}") ? undefined : configuredBaseUrl;
     const client = new GoogleGenAI({
       vertexai: true,
-      ...(project ? { project } : {}),
-      ...(location ? { location } : {}),
-      ...(apiKey ? { apiKey } : {}),
+      ...(apiKey ? { apiKey } : {
+        project,
+        location,
+        ...(env.GOOGLE_APPLICATION_CREDENTIALS ? {
+          googleAuthOptions: { keyFilename: env.GOOGLE_APPLICATION_CREDENTIALS },
+        } : {}),
+      }),
       apiVersion: "v1",
-      ...(baseUrl ? { httpOptions: { baseUrl } } : {}),
+      httpOptions: {
+        headers: Object.fromEntries(headers),
+        ...(baseUrl ? { baseUrl, baseUrlResourceScope: ResourceScope.COLLECTION } : {}),
+      },
     });
     const response = await client.models.generateContent({
       model: modelId,
@@ -148,8 +156,10 @@ async function generateImage(
       config: { responseModalities: [Modality.TEXT, Modality.IMAGE], abortSignal: signal },
     });
     let data: Buffer | undefined;
-    for (const part of response.candidates?.[0]?.content?.parts ?? []) {
-      if (part.inlineData?.data) data = Buffer.from(part.inlineData.data, "base64");
+    for (const candidate of response.candidates ?? []) {
+      for (const part of candidate.content?.parts ?? []) {
+        if (part.inlineData?.data) data = Buffer.from(part.inlineData.data, "base64");
+      }
     }
     if (!data || data.length === 0) throw new Error("Image provider returned no image");
     await mkdir(path.dirname(output), { recursive: true });
@@ -157,6 +167,8 @@ async function generateImage(
     return;
   }
 
+  let url: string;
+  let body: Record<string, unknown>;
   if (providerId === "google") {
     const baseUrl = resolved.auth.baseUrl ?? provider?.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta";
     url = `${baseUrl.replace(/\/$/, "")}/models/${encodeURIComponent(modelId)}:generateContent`;
@@ -259,7 +271,7 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "ask",
     label: "Tiny Ask",
-    description: "Ask a configured model to inspect local media or generate an image. Set output to generate with Google, OpenAI, or OpenRouter and save the returned image.",
+    description: "Ask a configured model to inspect local media or generate an image. Set output to generate with Google, Google Vertex, OpenAI, or OpenRouter and save the returned image.",
     promptSnippet: "Inspect media or generate an image with a configured model",
     promptGuidelines: [
       "Use ask when a task needs image, audio, video, or PDF understanding that would benefit from another model.",
