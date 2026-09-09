@@ -3,7 +3,7 @@ import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { GoogleGenAI, Modality, ResourceScope } from "@google/genai";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { StringEnum, type Api, type Model } from "@earendil-works/pi-ai";
 import OpenAI, { toFile } from "openai";
 import { Type } from "typebox";
 
@@ -25,6 +25,16 @@ const MEDIA = {
   ".webm": ["video/webm", "video"],
   ".mov": ["video/quicktime", "video"],
 } as const;
+
+const SUPPORTED_APIS = [
+  "anthropic-messages",
+  "openai-completions",
+  "openai-responses",
+  "openai-codex-responses",
+  "azure-openai-responses",
+  "google-generative-ai",
+  "google-vertex",
+] as const;
 
 type MediaKind = (typeof MEDIA)[keyof typeof MEDIA][1];
 type MediaFile = {
@@ -67,7 +77,7 @@ function generationApi(providerId: string, model: Model<Api> | undefined, provid
 
 function assertKinds(files: MediaFile[], allowed: MediaKind[], api: Api): void {
   const unsupported = files.find((file) => !allowed.includes(file.kind));
-  if (unsupported) throw new Error(`${api} does not support ${unsupported.kind} input: ${unsupported.name}`);
+  if (unsupported) throw new Error(`ask ${api} serializer does not support ${unsupported.kind} input: ${unsupported.name}`);
 }
 
 async function saveImage(output: string, data: Buffer): Promise<void> {
@@ -172,17 +182,34 @@ async function callOpenAI(request: Request): Promise<string | undefined> {
   }
 
   if (request.api === "openai-completions") {
-    assertKinds(request.files, ["image"], request.api);
-    const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [{ type: "text", text: request.prompt }];
+    assertKinds(request.files, ["image", "audio", "document"], request.api);
+    const content: Array<OpenAI.Chat.Completions.ChatCompletionContentPart | {
+      type: "input_audio";
+      input_audio: { data: string; format: string };
+    }> = [{ type: "text", text: request.prompt }];
     for (const file of request.files) {
-      content.push({
-        type: "image_url",
-        image_url: { url: `data:${file.mimeType};base64,${file.data.toString("base64")}` },
-      });
+      if (file.kind === "audio") {
+        const extension = path.extname(file.name).slice(1).toLowerCase();
+        content.push({
+          type: "input_audio",
+          input_audio: { data: file.data.toString("base64"), format: extension === "oga" ? "ogg" : extension },
+        });
+      } else if (file.kind === "document") {
+        content.push({
+          type: "file",
+          file: { filename: file.name, file_data: `data:${file.mimeType};base64,${file.data.toString("base64")}` },
+        });
+      } else {
+        content.push({ type: "image_url", image_url: { url: `data:${file.mimeType};base64,${file.data.toString("base64")}` } });
+      }
     }
     const response = await client.chat.completions.create({
       model: request.modelId,
-      messages: [{ role: "user", content }],
+      messages: [{
+        role: "user",
+        // Compatible endpoints can accept audio formats beyond the SDK's WAV/MP3 types.
+        content: content as OpenAI.Chat.Completions.ChatCompletionContentPart[],
+      }],
     }, { signal: request.signal });
     return response.choices.map((choice) => choice.message.content ?? "").join("\n").trim();
   }
@@ -279,6 +306,7 @@ export default function (pi: ExtensionAPI): void {
     ],
     parameters: Type.Object({
       model: Type.String({ description: "Exact provider/model ID" }),
+      api: Type.Optional(StringEnum(SUPPORTED_APIS, { description: "Override the model's configured API serializer" })),
       prompt: Type.String({ description: "What the other model should do" }),
       files: Type.Optional(Type.Array(Type.String(), { description: "Media paths relative to the workspace" })),
       output: Type.Optional(Type.String({ description: "Workspace-relative path for a generated image" })),
@@ -289,7 +317,7 @@ export default function (pi: ExtensionAPI): void {
       const providerId = params.model.slice(0, slash);
       const modelId = params.model.slice(slash + 1);
       const model = ctx.modelRegistry.find(providerId, modelId);
-      if (!model && !params.output) throw new Error(`Model not found: ${params.model}`);
+      if (!model && !params.api && !params.output) throw new Error(`Model not found: ${params.model}`);
       const provider = ctx.modelRegistry.getProvider(providerId);
       if (!provider) throw new Error(`Provider not found: ${providerId}`);
       const resolved = await ctx.modelRegistry.getProviderAuth(providerId) as RequestAuth | undefined;
@@ -317,9 +345,9 @@ export default function (pi: ExtensionAPI): void {
           kind: media[1],
         };
       }));
-      const api = output && providerId === "openrouter"
+      const api = params.api ?? (output && providerId === "openrouter"
         ? "openai-completions"
-        : output ? generationApi(providerId, model, provider.getModels()) : model!.api;
+        : output ? generationApi(providerId, model, provider.getModels()) : model!.api);
       if (output) assertKinds(files, ["image"], api);
 
       const headers: Record<string, string> = {};
@@ -345,7 +373,7 @@ export default function (pi: ExtensionAPI): void {
       };
 
       let answer: string | undefined;
-      if (request.output && providerId === "openrouter") await callOpenRouterImage(request);
+      if (request.output && providerId === "openrouter" && !params.api) await callOpenRouterImage(request);
       else if (request.api === "anthropic-messages") answer = await callAnthropic(request);
       else if (request.api === "google-generative-ai" || request.api === "google-vertex") {
         answer = await callGoogle(request);

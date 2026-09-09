@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "keywords": ["pi-package"],
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.123.0",
     "@google/genai": "^1.52.0",
