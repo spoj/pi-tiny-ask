@@ -6,7 +6,37 @@ import test, { type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import register from "../extensions/ask.ts";
 
-async function fixture(t: TestContext, modelApi = "openai-completions", registered = true, providerId = "custom") {
+type HeaderMap = Record<string, string | null>;
+type FixtureOptions = {
+  baseUrl?: string;
+  providerHeaders?: HeaderMap;
+  modelHeaders?: HeaderMap;
+  modelOverrideHeaders?: HeaderMap;
+  auth?: { apiKey?: string; headers?: HeaderMap };
+  authError?: string;
+  respond?: (request: Request) => Response | Promise<Response>;
+};
+
+function setEnv(t: TestContext, name: string, value: string): void {
+  const previous = process.env[name];
+  process.env[name] = value;
+  t.after(() => {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  });
+}
+
+function textOf(result: { content: Array<unknown> }): string {
+  return (result.content[0] as { text: string }).text;
+}
+
+async function fixture(
+  t: TestContext,
+  modelApi = "openai-completions",
+  registered = true,
+  providerId = "custom",
+  options: FixtureOptions = {},
+) {
   const cwd = await mkdtemp(path.join(tmpdir(), "tiny-ask-"));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   for (const name of ["photo.png", "voice.oga", "voice.OGG", "voice.opus", "voice.mp3", "voice.wav", "voice.m4a", "voice.aac", "report.pdf", "clip.mp4"]) {
@@ -16,9 +46,10 @@ async function fixture(t: TestContext, modelApi = "openai-completions", register
   t.mock.method(globalThis, "fetch", async (input: string | Request, init?: RequestInit) => {
     const request = new Request(input, init);
     requests.push({ url: request.url, headers: request.headers, body: await request.json() });
+    if (options.respond) return options.respond(request);
     return Response.json({
       object: "response",
-      choices: [{ message: { content: "ok" } }],
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
       output: [{ type: "message", content: [{ type: "output_text", text: "ok", annotations: [] }] }],
       content: [{ type: "text", text: "ok" }],
       candidates: [{ content: { parts: [{ text: "ok" }] } }],
@@ -27,24 +58,47 @@ async function fixture(t: TestContext, modelApi = "openai-completions", register
   });
   let tool!: ToolDefinition;
   register({ registerTool(definition: ToolDefinition) { tool = definition; } } as ExtensionAPI);
-  const model = { api: modelApi, headers: { "x-model": "configured" } };
+  const baseUrl = options.baseUrl ?? "https://gateway.test/v1";
+  const providerHeaders = options.providerHeaders ?? {};
+  const modelHeaders = options.modelHeaders ?? { "x-model": "configured" };
+  const modelOverrideHeaders = options.modelOverrideHeaders ?? {};
+  const apiKey = options.auth ? options.auth.apiKey : "test-key";
+  const authHeaders = options.auth?.headers ?? {};
+  const model = { api: modelApi, headers: modelHeaders };
   const ctx = {
     cwd,
     modelRegistry: {
       find: () => registered ? model : undefined,
       getProvider: (id: string) => id === providerId ? {
-        baseUrl: "https://gateway.test/v1",
+        baseUrl,
+        headers: providerHeaders,
         getModels: () => registered ? [model] : [],
       } : undefined,
-      getProviderAuth: async () => ({ auth: { apiKey: "test-key" } }),
+      getApiKeyAndHeaders: async () => options.authError
+        ? { ok: false, error: options.authError }
+        : { ok: true, apiKey, headers: { ...providerHeaders, ...authHeaders, ...modelHeaders, ...modelOverrideHeaders }, baseUrl: options.baseUrl },
+      getProviderAuth: async () => ({ auth: { apiKey, headers: authHeaders, baseUrl: options.baseUrl } }),
     },
   } as unknown as ExtensionContext;
   return {
     cwd, requests, tool,
-    run: (params: Record<string, unknown>) => tool.execute("test", {
+    run: (params: Record<string, unknown>, signal?: AbortSignal) => tool.execute("test", {
       model: `${providerId}/test-model`, prompt: "inspect these", ...params,
-    }, undefined, undefined, ctx),
+    }, signal, undefined, ctx),
   };
+}
+
+function anthropicResponse(options: { text?: string; stopReason?: string } = {}) {
+  return Response.json({
+    id: "msg_1",
+    type: "message",
+    role: "assistant",
+    model: "test-model",
+    content: options.text ? [{ type: "text", text: options.text }] : [],
+    stop_reason: options.stopReason ?? "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 1 },
+  });
 }
 
 test("uses the registered API and serializes chat image, audio, and PDF inputs", async (t) => {
@@ -124,4 +178,186 @@ test("explicit API overrides OpenRouter image routing; omission preserves it", a
   assert.equal(requests[0].url, "https://gateway.test/v1/images");
   assert.equal(requests[1].url, "https://gateway.test/v1/images/generations");
   assert.equal(await readFile(path.join(cwd, "explicit.png"), "utf8"), "image");
+});
+
+test("honors model-scoped auth headers and fails closed on unresolved auth", async (t) => {
+  const { run, requests } = await fixture(t, "openai-completions", true, "custom", {
+    providerHeaders: { "x-provider": "p", "x-shared": "provider" },
+    modelOverrideHeaders: { "x-model-override": "mo", "x-shared": "model" },
+  });
+  await run({ files: ["photo.png"] });
+  assert.equal(requests[0].headers.get("x-provider"), "p");
+  assert.equal(requests[0].headers.get("x-model"), "configured");
+  assert.equal(requests[0].headers.get("x-model-override"), "mo");
+  assert.equal(requests[0].headers.get("x-shared"), "model");
+
+  const failing = await fixture(t, "openai-completions", true, "custom", { authError: 'No API key found for "custom"' });
+  await assert.rejects(failing.run({ files: ["photo.png"] }), /No API key found/);
+  assert.equal(failing.requests.length, 0);
+});
+
+test("does not send ambient Anthropic credentials to header-authenticated providers", async (t) => {
+  setEnv(t, "ANTHROPIC_API_KEY", "sk-ant-ambient");
+  setEnv(t, "ANTHROPIC_AUTH_TOKEN", "ambient-auth-token");
+  const { run, requests } = await fixture(t, "anthropic-messages", true, "custom", {
+    auth: { headers: { authorization: "Bearer real-token" } },
+    respond: () => anthropicResponse({ text: "ok" }),
+  });
+  await run({ files: ["photo.png"] });
+  assert.notEqual(requests[0].headers.get("x-api-key"), "sk-ant-ambient");
+  assert.notEqual(requests[0].headers.get("authorization"), "Bearer ambient-auth-token");
+  assert.equal(requests[0].headers.get("authorization"), "Bearer real-token");
+});
+
+test("does not send ambient Google credentials to header-authenticated providers", async (t) => {
+  setEnv(t, "GEMINI_API_KEY", "ambient-gemini");
+  const { run, requests } = await fixture(t, "google-generative-ai", true, "custom", {
+    auth: { headers: { "x-proxy-key": "proxy-secret" } },
+  });
+  await run({ files: ["photo.png"] });
+  assert.notEqual(requests[0].headers.get("x-goog-api-key"), "ambient-gemini");
+  assert.equal(requests[0].headers.get("x-goog-api-key"), "pi-auth");
+  assert.equal(requests[0].headers.get("x-proxy-key"), "proxy-secret");
+});
+
+test("keeps non-Vertex Google serialization when ambient vertex flags are set", async (t) => {
+  setEnv(t, "GOOGLE_GENAI_USE_VERTEXAI", "true");
+  const { run, requests } = await fixture(t, "google-generative-ai");
+  await run({ files: ["photo.png"] });
+  assert.match(requests[0].url, /^https:\/\/gateway\.test\/v1\/models\/test-model:generateContent/);
+});
+
+test("preserves a resolved authorization header for OpenRouter image requests", async (t) => {
+  const { run, requests, cwd } = await fixture(t, "openai-completions", false, "openrouter", {
+    auth: { headers: { authorization: "Bearer oauth-style" } },
+  });
+  await run({ output: "image.png" });
+  assert.equal(requests[0].headers.get("authorization"), "Bearer oauth-style");
+  assert.equal(await readFile(path.join(cwd, "image.png"), "utf8"), "image");
+});
+
+test("rejects Azure and Codex transports but keeps them out of the API enum", async (t) => {
+  const codex = await fixture(t, "openai-codex-responses");
+  assert.ok(!Reflect.get(codex.tool.parameters, "properties").api.enum.includes("openai-codex-responses"));
+  await assert.rejects(codex.run({}), /ask does not support the openai-codex-responses transport/);
+  assert.equal(codex.requests.length, 0);
+
+  const azure = await fixture(t, "azure-openai-responses");
+  assert.ok(!Reflect.get(azure.tool.parameters, "properties").api.enum.includes("azure-openai-responses"));
+  await assert.rejects(azure.run({}), /ask does not support the azure-openai-responses transport/);
+  assert.equal(azure.requests.length, 0);
+});
+
+test("requires an endpoint for every non-Vertex serializer", async (t) => {
+  const overridden = await fixture(t, "openai-completions", true, "azure", { baseUrl: "" });
+  await assert.rejects(overridden.run({ api: "anthropic-messages" }), /Provider has no configured endpoint: azure/);
+  assert.equal(overridden.requests.length, 0);
+
+  const vertexOverride = await fixture(t, "azure-openai-responses", true, "azure", { baseUrl: "" });
+  await assert.rejects(vertexOverride.run({ api: "google-vertex" }), /Provider has no configured endpoint: azure/);
+  assert.equal(vertexOverride.requests.length, 0);
+
+  const configured = await fixture(t, "openai-completions", true, "custom", { baseUrl: "" });
+  await assert.rejects(configured.run({ files: ["photo.png"] }), /Provider has no configured endpoint: custom/);
+  assert.equal(configured.requests.length, 0);
+});
+
+test("uses a built-in-style configured endpoint when no override is given", async (t) => {
+  const { run, requests } = await fixture(t, "openai-completions", true, "openai", { baseUrl: "https://api.openai.com/v1" });
+  await run({ files: ["photo.png"] });
+  assert.equal(requests[0].url, "https://api.openai.com/v1/chat/completions");
+});
+
+test("allows Vertex native endpoint derivation without a configured endpoint", async (t) => {
+  const { run, requests } = await fixture(t, "google-vertex", true, "google-vertex", { baseUrl: "" });
+  const result = await run({ files: ["photo.png"] });
+  assert.equal(textOf(result), "ok");
+  assert.match(requests[0].url, /^https:\/\/aiplatform\.googleapis\.com\//);
+});
+
+test("reports truncated and refused provider responses with an explicit status", async (t) => {
+  const chat = await fixture(t, "openai-completions", true, "custom", {
+    respond: () => Response.json({ choices: [{ message: { content: "partial" }, finish_reason: "length" }] }),
+  });
+  const chatResult = await chat.run({ files: ["photo.png"] });
+  assert.match(textOf(chatResult), /partial/);
+  assert.match(textOf(chatResult), /\[ask: response truncated \(length\)\]/);
+  assert.equal((chatResult.details as { status?: string }).status, "response truncated (length)");
+
+  const responses = await fixture(t, "openai-responses", true, "custom", {
+    respond: () => Response.json({
+      id: "resp_1", object: "response", created_at: 0, status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" }, error: null, model: "test-model",
+      output: [{
+        type: "message", id: "msg_1", role: "assistant", status: "incomplete",
+        content: [{ type: "output_text", text: "partial", annotations: [] }],
+      }],
+    }),
+  });
+  const responsesResult = await responses.run({ files: ["report.pdf"] });
+  assert.match(textOf(responsesResult), /partial/);
+  assert.match(textOf(responsesResult), /\[ask: response incomplete \(max_output_tokens\)\]/);
+
+  const anthropic = await fixture(t, "anthropic-messages", true, "custom", {
+    respond: () => anthropicResponse({ text: "partial", stopReason: "max_tokens" }),
+  });
+  const anthropicResult = await anthropic.run({ files: ["photo.png"] });
+  assert.match(textOf(anthropicResult), /\[ask: response truncated \(max_tokens\)\]/);
+
+  const google = await fixture(t, "google-generative-ai", true, "custom", {
+    respond: () => Response.json({
+      candidates: [{ content: { role: "model", parts: [{ text: "partial" }] }, finishReason: "MAX_TOKENS" }],
+    }),
+  });
+  const googleResult = await google.run({ files: ["photo.png"] });
+  assert.match(textOf(googleResult), /\[ask: response truncated \(MAX_TOKENS\)\]/);
+});
+
+test("reports explicit model refusals", async (t) => {
+  const chat = await fixture(t, "openai-completions", true, "custom", {
+    respond: () => Response.json({ choices: [{ message: { content: null, refusal: "I can't help with that." }, finish_reason: "stop" }] }),
+  });
+  const chatResult = await chat.run({ files: ["photo.png"] });
+  assert.match(textOf(chatResult), /I can't help with that\./);
+  assert.match(textOf(chatResult), /\[ask: model refused the request\]/);
+
+  const responses = await fixture(t, "openai-responses", true, "custom", {
+    respond: () => Response.json({
+      id: "resp_1", object: "response", created_at: 0, status: "completed",
+      incomplete_details: null, output_text: "", error: null, model: "test-model",
+      output: [{
+        type: "message", id: "msg_1", role: "assistant", status: "completed",
+        content: [{ type: "refusal", refusal: "I can't help with that." }],
+      }],
+    }),
+  });
+  const responsesResult = await responses.run({ files: ["report.pdf"] });
+  assert.match(textOf(responsesResult), /I can't help with that\./);
+  assert.match(textOf(responsesResult), /\[ask: model refused the request\]/);
+
+  const anthropic = await fixture(t, "anthropic-messages", true, "custom", {
+    respond: () => anthropicResponse({ stopReason: "refusal" }),
+  });
+  const anthropicResult = await anthropic.run({ files: ["photo.png"] });
+  assert.equal(textOf(anthropicResult), "[ask: model refused the request]");
+});
+
+test("does not retry SDK requests and honors a pre-aborted signal", async (t) => {
+  const openai = await fixture(t, "openai-completions", true, "custom", {
+    respond: () => Response.json({ error: { message: "server error" } }, { status: 500 }),
+  });
+  await assert.rejects(openai.run({ files: ["photo.png"] }));
+  assert.equal(openai.requests.length, 1);
+
+  const anthropic = await fixture(t, "anthropic-messages", true, "custom", {
+    respond: () => Response.json({ type: "error", error: { type: "api_error", message: "server error" } }, { status: 500 }),
+  });
+  await assert.rejects(anthropic.run({ files: ["photo.png"] }));
+  assert.equal(anthropic.requests.length, 1);
+
+  const aborted = await fixture(t, "google-generative-ai");
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(aborted.run({ api: "google-generative-ai", files: ["voice.oga"] }, controller.signal), /abort/i);
+  assert.equal(aborted.requests.length, 0);
 });

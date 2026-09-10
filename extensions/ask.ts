@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { GoogleGenAI, Modality, ResourceScope } from "@google/genai";
+import { FinishReason, GoogleGenAI, Modality, ResourceScope } from "@google/genai";
 import { StringEnum, type Api, type Model } from "@earendil-works/pi-ai";
 import OpenAI, { toFile } from "openai";
 import { Type } from "typebox";
@@ -30,8 +30,6 @@ const SUPPORTED_APIS = [
   "anthropic-messages",
   "openai-completions",
   "openai-responses",
-  "openai-codex-responses",
-  "azure-openai-responses",
   "google-generative-ai",
   "google-vertex",
 ] as const;
@@ -64,6 +62,7 @@ type Request = {
   prompt: string;
   signal?: AbortSignal;
 };
+type Answer = { text: string; status?: string };
 
 function generationApi(providerId: string, model: Model<Api> | undefined, providerModels: readonly Model<Api>[]): Api {
   if (model) return model.api;
@@ -86,7 +85,7 @@ async function saveImage(output: string, data: Buffer): Promise<void> {
   await writeFile(output, data);
 }
 
-async function callAnthropic(request: Request): Promise<string> {
+async function callAnthropic(request: Request): Promise<Answer> {
   if (request.output) throw new Error("Anthropic does not support image generation");
   assertKinds(request.files, ["image", "document"], request.api);
   const content: Anthropic.Messages.ContentBlockParam[] = [{ type: "text", text: request.prompt }];
@@ -106,25 +105,33 @@ async function callAnthropic(request: Request): Promise<string> {
       });
   }
   const client = new Anthropic({
-    apiKey: request.apiKey,
+    apiKey: request.apiKey ?? "pi-auth",
+    authToken: null,
     baseURL: request.baseUrl,
     defaultHeaders: request.headers,
+    maxRetries: 0,
   });
   const response = await client.messages.create({
     model: request.modelId,
     max_tokens: request.maxTokens ?? 16_384,
     messages: [{ role: "user", content }],
   }, { signal: request.signal });
-  return response.content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
+  const status = response.stop_reason === "max_tokens"
+    ? "response truncated (max_tokens)"
+    : response.stop_reason === "refusal" ? "model refused the request" : undefined;
+  return {
+    text: response.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("\n")
+      .trim(),
+    status,
+  };
 }
 
 async function callOpenRouterImage(request: Request): Promise<void> {
   const headers = new Headers(request.headers);
-  headers.set("authorization", `Bearer ${request.apiKey}`);
+  if (request.apiKey) headers.set("authorization", `Bearer ${request.apiKey}`);
   headers.set("content-type", "application/json");
   const response = await fetch(`${(request.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/$/, "")}/images`, {
     method: "POST",
@@ -149,11 +156,12 @@ async function callOpenRouterImage(request: Request): Promise<void> {
   await saveImage(request.output!, Buffer.from(data, "base64"));
 }
 
-async function callOpenAI(request: Request): Promise<string | undefined> {
+async function callOpenAI(request: Request): Promise<Answer | undefined> {
   const client = new OpenAI({
     apiKey: request.apiKey ?? "pi-auth",
     baseURL: request.baseUrl,
     defaultHeaders: request.headers,
+    maxRetries: 0,
   });
 
   if (request.output) {
@@ -211,7 +219,16 @@ async function callOpenAI(request: Request): Promise<string | undefined> {
         content: content as OpenAI.Chat.Completions.ChatCompletionContentPart[],
       }],
     }, { signal: request.signal });
-    return response.choices.map((choice) => choice.message.content ?? "").join("\n").trim();
+    const choice = response.choices[0];
+    const status = choice?.message.refusal
+      ? "model refused the request"
+      : choice?.finish_reason === "length"
+        ? "response truncated (length)"
+        : choice?.finish_reason === "content_filter" ? "response blocked by content filter" : undefined;
+    return {
+      text: response.choices.map((choice) => choice.message.content ?? choice.message.refusal ?? "").join("\n").trim(),
+      status,
+    };
   }
 
   assertKinds(request.files, ["image", "document"], request.api);
@@ -233,10 +250,22 @@ async function callOpenAI(request: Request): Promise<string | undefined> {
     model: request.modelId,
     input: [{ role: "user", content }],
   }, { signal: request.signal });
-  return response.output_text.trim();
+  const refusal = response.output
+    .filter((item) => item.type === "message")
+    .flatMap((item) => item.content)
+    .find((content) => content.type === "refusal");
+  const status = refusal
+    ? "model refused the request"
+    : response.status === "incomplete"
+      ? `response incomplete (${response.incomplete_details?.reason ?? "unknown"})`
+      : response.status === "failed"
+        ? (response.error?.message ? `response failed: ${response.error.message}` : "response failed")
+        : response.status === "cancelled" ? "response cancelled" : undefined;
+  const text = response.output_text ?? "";
+  return { text: text || refusal?.refusal || "", status };
 }
 
-async function callGoogle(request: Request): Promise<string | undefined> {
+async function callGoogle(request: Request): Promise<Answer | undefined> {
   const vertex = request.api === "google-vertex";
   const project = request.env.GOOGLE_CLOUD_PROJECT ?? request.env.GCLOUD_PROJECT;
   const location = request.env.GOOGLE_CLOUD_LOCATION;
@@ -264,7 +293,8 @@ async function callGoogle(request: Request): Promise<string | undefined> {
       },
     }
     : {
-      apiKey: request.apiKey,
+      vertexai: false,
+      apiKey: request.apiKey ?? "pi-auth",
       apiVersion: "v1beta",
       httpOptions: {
         headers: request.headers,
@@ -285,7 +315,13 @@ async function callGoogle(request: Request): Promise<string | undefined> {
       abortSignal: request.signal,
     },
   });
-  if (!request.output) return response.text?.trim() ?? "";
+  const finishReason = response.candidates
+    ?.map((candidate) => candidate.finishReason)
+    .find((reason) => reason !== undefined && reason !== FinishReason.STOP && reason !== FinishReason.FINISH_REASON_UNSPECIFIED);
+  const status = finishReason
+    ? finishReason === FinishReason.MAX_TOKENS ? "response truncated (MAX_TOKENS)" : `response stopped early (${finishReason})`
+    : response.promptFeedback?.blockReason ? `prompt blocked (${response.promptFeedback.blockReason})` : undefined;
+  if (!request.output) return { text: response.text?.trim() ?? "", status };
   let data: string | undefined;
   for (const candidate of response.candidates ?? []) {
     for (const part of candidate.content?.parts ?? []) data = part.inlineData?.data ?? data;
@@ -312,6 +348,7 @@ export default function (pi: ExtensionAPI): void {
       output: Type.Optional(Type.String({ description: "Workspace-relative path for a generated image" })),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      signal?.throwIfAborted();
       const slash = params.model.indexOf("/");
       if (slash < 1) throw new Error("model must use provider/model format");
       const providerId = params.model.slice(0, slash);
@@ -320,8 +357,16 @@ export default function (pi: ExtensionAPI): void {
       if (!model && !params.api && !params.output) throw new Error(`Model not found: ${params.model}`);
       const provider = ctx.modelRegistry.getProvider(providerId);
       if (!provider) throw new Error(`Provider not found: ${providerId}`);
-      const resolved = await ctx.modelRegistry.getProviderAuth(providerId) as RequestAuth | undefined;
-      if (!resolved) throw new Error(`Provider has no configured authentication: ${providerId}`);
+      let resolved: { apiKey?: string; baseUrl?: string; headers?: Record<string, string | null>; env?: Record<string, string> };
+      if (model) {
+        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+        if (!auth.ok) throw new Error(auth.error);
+        resolved = auth;
+      } else {
+        const auth = await ctx.modelRegistry.getProviderAuth(providerId) as RequestAuth | undefined;
+        if (!auth) throw new Error(`Provider has no configured authentication: ${providerId}`);
+        resolved = { ...auth.auth, env: auth.env };
+      }
 
       let output: string | undefined;
       if (params.output) {
@@ -334,6 +379,18 @@ export default function (pi: ExtensionAPI): void {
         }
       }
 
+      const api = params.api ?? (output && providerId === "openrouter"
+        ? "openai-completions"
+        : output ? generationApi(providerId, model, provider.getModels()) : model!.api);
+      if (!(SUPPORTED_APIS as readonly string[]).includes(api)) {
+        throw new Error(api === "openai-codex-responses" || api === "azure-openai-responses"
+          ? `ask does not support the ${api} transport`
+          : `Unsupported API serialization format: ${api}`);
+      }
+      const baseUrl = resolved.baseUrl ?? model?.baseUrl ?? provider.baseUrl;
+      const nativeVertex = !params.api && api === "google-vertex";
+      if (!baseUrl && !nativeVertex) throw new Error(`Provider has no configured endpoint: ${providerId}`);
+
       const files = await Promise.all((params.files ?? []).map(async (file): Promise<MediaFile> => {
         const filePath = path.resolve(ctx.cwd, file.replace(/^@/, ""));
         const media = MEDIA[path.extname(filePath).toLowerCase() as keyof typeof MEDIA];
@@ -345,23 +402,16 @@ export default function (pi: ExtensionAPI): void {
           kind: media[1],
         };
       }));
-      const api = params.api ?? (output && providerId === "openrouter"
-        ? "openai-completions"
-        : output ? generationApi(providerId, model, provider.getModels()) : model!.api);
       if (output) assertKinds(files, ["image"], api);
 
       const headers: Record<string, string> = {};
-      for (const [name, value] of Object.entries({
-        ...provider.headers,
-        ...model?.headers,
-        ...resolved.auth.headers,
-      })) {
+      for (const [name, value] of Object.entries({ ...provider.headers, ...resolved.headers })) {
         if (value !== null) headers[name] = value;
       }
       const request: Request = {
         api,
-        apiKey: resolved.auth.apiKey === "gcp-vertex-credentials" ? undefined : resolved.auth.apiKey,
-        baseUrl: resolved.auth.baseUrl ?? model?.baseUrl ?? provider.baseUrl,
+        apiKey: resolved.apiKey === "gcp-vertex-credentials" ? undefined : resolved.apiKey,
+        baseUrl,
         env: { ...process.env, ...resolved.env },
         files,
         headers,
@@ -372,21 +422,22 @@ export default function (pi: ExtensionAPI): void {
         signal,
       };
 
-      let answer: string | undefined;
+      signal?.throwIfAborted();
+      let answer: Answer | undefined;
       if (request.output && providerId === "openrouter" && !params.api) await callOpenRouterImage(request);
       else if (request.api === "anthropic-messages") answer = await callAnthropic(request);
       else if (request.api === "google-generative-ai" || request.api === "google-vertex") {
         answer = await callGoogle(request);
-      } else if (request.api === "openai-completions" || request.api === "openai-responses" ||
-        request.api === "openai-codex-responses" || request.api === "azure-openai-responses") {
+      } else if (request.api === "openai-completions" || request.api === "openai-responses") {
         answer = await callOpenAI(request);
-      } else {
-        throw new Error(`Unsupported API serialization format: ${request.api}`);
       }
 
+      const text = answer?.text ?? "";
+      const status = answer?.status;
+      const result = status ? (text ? `${text}\n\n[ask: ${status}]` : `[ask: ${status}]`) : text;
       return {
-        content: [{ type: "text", text: output ? `Image saved to ${params.output}` : answer ?? "" }],
-        details: { model: params.model, files: params.files ?? [], output: params.output },
+        content: [{ type: "text", text: output ? `Image saved to ${params.output}` : result }],
+        details: { model: params.model, files: params.files ?? [], output: params.output, status },
       };
     },
   });
