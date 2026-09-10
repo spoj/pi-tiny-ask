@@ -39,7 +39,7 @@ async function fixture(
 ) {
   const cwd = await mkdtemp(path.join(tmpdir(), "tiny-ask-"));
   t.after(() => rm(cwd, { recursive: true, force: true }));
-  for (const name of ["photo.png", "voice.oga", "voice.OGG", "voice.opus", "voice.mp3", "voice.wav", "voice.m4a", "voice.aac", "report.pdf", "clip.mp4"]) {
+  for (const name of ["photo.png", "anim.gif", "voice.oga", "voice.OGG", "voice.opus", "voice.mp3", "voice.wav", "voice.m4a", "voice.aac", "report.pdf", "clip.mp4"]) {
     await writeFile(path.join(cwd, name), "media");
   }
   const requests: Array<{ url: string; headers: Headers; body: any }> = [];
@@ -151,6 +151,37 @@ test("rejects unsupported chat video locally and preserves provider errors", asy
     error: { message: "This model does not support document input" },
   }, { status: 400 }));
   await assert.rejects(run({ files: ["report.pdf"] }), /This model does not support document input/);
+});
+
+test("validates media kinds before reading file contents", async (t) => {
+  const { run, requests } = await fixture(t);
+  await assert.rejects(run({ files: ["missing.mp4"] }), /ask openai-completions serializer does not support video input: missing\.mp4/);
+  await assert.rejects(run({ output: "out.png", files: ["missing.pdf"] }), /ask openai-completions serializer does not support document input: missing\.pdf/);
+  await assert.rejects(run({ api: "google-generative-ai", output: "out.png", files: ["missing.mp4"] }), /ask google-generative-ai serializer does not support video input: missing\.mp4/);
+  assert.equal(requests.length, 0);
+});
+
+test("Google serializers accept every supported media kind inline", async (t) => {
+  const { run, requests } = await fixture(t);
+  await run({ api: "google-generative-ai", files: ["clip.mp4", "voice.oga", "report.pdf", "photo.png"] });
+  assert.deepEqual(requests[0].body.contents[0].parts.slice(1), [
+    { inlineData: { mimeType: "video/mp4", data: "bWVkaWE=" } },
+    { inlineData: { mimeType: "audio/ogg", data: "bWVkaWE=" } },
+    { inlineData: { mimeType: "application/pdf", data: "bWVkaWE=" } },
+    { inlineData: { mimeType: "image/png", data: "bWVkaWE=" } },
+  ]);
+});
+
+test("rejects GIF input only for OpenAI image generation", async (t) => {
+  const { run, requests } = await fixture(t);
+  await run({ files: ["anim.gif"] });
+  assert.equal(requests[0].body.messages[0].content[1].image_url.url, "data:image/gif;base64,bWVkaWE=");
+  await assert.rejects(run({ output: "out.png", files: ["anim.gif"] }), /OpenAI image generation does not support GIF input: anim\.gif/);
+  assert.equal(requests.length, 1);
+
+  const openrouter = await fixture(t, "openai-completions", false, "openrouter");
+  await openrouter.run({ output: "out.png", files: ["anim.gif"] });
+  assert.equal(openrouter.requests[0].url, "https://gateway.test/v1/images");
 });
 
 test("preserves Responses PDF serialization without an override", async (t) => {

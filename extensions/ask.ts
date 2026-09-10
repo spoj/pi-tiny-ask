@@ -26,15 +26,17 @@ const MEDIA = {
   ".mov": ["video/quicktime", "video"],
 } as const;
 
-const SUPPORTED_APIS = [
-  "anthropic-messages",
-  "openai-completions",
-  "openai-responses",
-  "google-generative-ai",
-  "google-vertex",
-] as const;
-
 type MediaKind = (typeof MEDIA)[keyof typeof MEDIA][1];
+
+const MEDIA_KINDS = {
+  "anthropic-messages": ["image", "document"],
+  "openai-completions": ["image", "audio", "document"],
+  "openai-responses": ["image", "document"],
+  "google-generative-ai": ["image", "document", "audio", "video"],
+  "google-vertex": ["image", "document", "audio", "video"],
+} satisfies Record<string, readonly MediaKind[]>;
+const SUPPORTED_APIS = Object.keys(MEDIA_KINDS) as (keyof typeof MEDIA_KINDS)[];
+
 type MediaFile = {
   data: Buffer;
   name: string;
@@ -74,11 +76,6 @@ function generationApi(providerId: string, model: Model<Api> | undefined, provid
   throw new Error(`Cannot infer the API serialization format for unregistered model: ${providerId}`);
 }
 
-function assertKinds(files: MediaFile[], allowed: MediaKind[], api: Api): void {
-  const unsupported = files.find((file) => !allowed.includes(file.kind));
-  if (unsupported) throw new Error(`ask ${api} serializer does not support ${unsupported.kind} input: ${unsupported.name}`);
-}
-
 async function saveImage(output: string, data: Buffer): Promise<void> {
   if (data.length === 0) throw new Error("Image provider returned an empty image");
   await mkdir(path.dirname(output), { recursive: true });
@@ -87,7 +84,6 @@ async function saveImage(output: string, data: Buffer): Promise<void> {
 
 async function callAnthropic(request: Request): Promise<Answer> {
   if (request.output) throw new Error("Anthropic does not support image generation");
-  assertKinds(request.files, ["image", "document"], request.api);
   const content: Anthropic.Messages.ContentBlockParam[] = [{ type: "text", text: request.prompt }];
   for (const file of request.files) {
     content.push(file.kind === "document"
@@ -165,9 +161,6 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
   });
 
   if (request.output) {
-    assertKinds(request.files, ["image"], request.api);
-    const unsupported = request.files.find((file) => file.mimeType === "image/gif");
-    if (unsupported) throw new Error(`OpenAI image generation does not support GIF input: ${unsupported.name}`);
     const response = request.files.length
       ? await client.images.edit({
         model: request.modelId,
@@ -190,7 +183,6 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
   }
 
   if (request.api === "openai-completions") {
-    assertKinds(request.files, ["image", "audio", "document"], request.api);
     const content: Array<OpenAI.Chat.Completions.ChatCompletionContentPart | {
       type: "input_audio";
       input_audio: { data: string; format: string };
@@ -231,7 +223,6 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
     };
   }
 
-  assertKinds(request.files, ["image", "document"], request.api);
   const content: OpenAI.Responses.ResponseInputContent[] = [{ type: "input_text", text: request.prompt }];
   for (const file of request.files) {
     content.push(file.kind === "document"
@@ -379,7 +370,8 @@ export default function (pi: ExtensionAPI): void {
         }
       }
 
-      const api = params.api ?? (output && providerId === "openrouter"
+      const openRouterImage = output !== undefined && providerId === "openrouter" && !params.api;
+      const api = params.api ?? (openRouterImage
         ? "openai-completions"
         : output ? generationApi(providerId, model, provider.getModels()) : model!.api);
       if (!(SUPPORTED_APIS as readonly string[]).includes(api)) {
@@ -391,18 +383,25 @@ export default function (pi: ExtensionAPI): void {
       const nativeVertex = !params.api && api === "google-vertex";
       if (!baseUrl && !nativeVertex) throw new Error(`Provider has no configured endpoint: ${providerId}`);
 
+      const allowed: readonly MediaKind[] = output ? ["image"] : MEDIA_KINDS[api as keyof typeof MEDIA_KINDS];
       const files = await Promise.all((params.files ?? []).map(async (file): Promise<MediaFile> => {
         const filePath = path.resolve(ctx.cwd, file.replace(/^@/, ""));
         const media = MEDIA[path.extname(filePath).toLowerCase() as keyof typeof MEDIA];
         if (!media) throw new Error(`Unsupported file: ${file}`);
+        const name = path.basename(filePath);
+        if (!allowed.includes(media[1])) {
+          throw new Error(`ask ${api} serializer does not support ${media[1]} input: ${name}`);
+        }
+        if (output && !openRouterImage && media[0] === "image/gif" && (api === "openai-completions" || api === "openai-responses")) {
+          throw new Error(`OpenAI image generation does not support GIF input: ${name}`);
+        }
         return {
           data: await readFile(filePath),
-          name: path.basename(filePath),
+          name,
           mimeType: media[0],
           kind: media[1],
         };
       }));
-      if (output) assertKinds(files, ["image"], api);
 
       const headers: Record<string, string> = {};
       for (const [name, value] of Object.entries({ ...provider.headers, ...resolved.headers })) {
@@ -424,7 +423,7 @@ export default function (pi: ExtensionAPI): void {
 
       signal?.throwIfAborted();
       let answer: Answer | undefined;
-      if (request.output && providerId === "openrouter" && !params.api) await callOpenRouterImage(request);
+      if (openRouterImage) await callOpenRouterImage(request);
       else if (request.api === "anthropic-messages") answer = await callAnthropic(request);
       else if (request.api === "google-generative-ai" || request.api === "google-vertex") {
         answer = await callGoogle(request);
