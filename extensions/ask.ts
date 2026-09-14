@@ -104,11 +104,11 @@ async function callAnthropic(request: Request): Promise<Answer> {
     defaultHeaders: request.headers,
     maxRetries: 0,
   });
-  const response = await client.messages.create({
+  const response = await client.messages.stream({
     model: request.modelId,
     max_tokens: request.maxTokens ?? 16_384,
     messages: [{ role: "user", content }],
-  }, { signal: request.signal });
+  }, { signal: request.signal }).finalMessage();
   const status = response.stop_reason === "max_tokens"
     ? "response truncated (max_tokens)"
     : response.stop_reason === "refusal" ? "model refused the request" : undefined;

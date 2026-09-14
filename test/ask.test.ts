@@ -5,6 +5,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import register from "../extensions/ask.ts";
+import { anthropicResponse } from "./anthropic-response.ts";
 
 type HeaderMap = Record<string, string | null>;
 type FixtureOptions = {
@@ -47,6 +48,7 @@ async function fixture(
     const request = new Request(input, init);
     requests.push({ url: request.url, headers: request.headers, body: await request.json() });
     if (options.respond) return options.respond(request);
+    if (requests.at(-1)!.body.stream) return anthropicResponse({ text: "ok" });
     return Response.json({
       object: "response",
       choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
@@ -86,19 +88,6 @@ async function fixture(
       model: `${providerId}/test-model`, prompt: "inspect these", ...params,
     }, signal, undefined, ctx),
   };
-}
-
-function anthropicResponse(options: { text?: string; stopReason?: string } = {}) {
-  return Response.json({
-    id: "msg_1",
-    type: "message",
-    role: "assistant",
-    model: "test-model",
-    content: options.text ? [{ type: "text", text: options.text }] : [],
-    stop_reason: options.stopReason ?? "end_turn",
-    stop_sequence: null,
-    usage: { input_tokens: 1, output_tokens: 1 },
-  });
 }
 
 test("uses the registered API and serializes chat image, audio, and PDF inputs", async (t) => {
