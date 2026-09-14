@@ -44,14 +44,6 @@ type MediaFile = {
   mimeType: string;
   kind: MediaKind;
 };
-type RequestAuth = {
-  auth: {
-    apiKey?: string;
-    headers?: Record<string, string | null>;
-    baseUrl?: string;
-  };
-  env?: Record<string, string>;
-};
 type Request = {
   api: Api;
   apiKey?: string;
@@ -81,6 +73,10 @@ async function saveImage(output: string, data: Buffer): Promise<void> {
   if (data.length === 0) throw new Error("Image provider returned an empty image");
   await mkdir(path.dirname(output), { recursive: true });
   await writeFile(output, data);
+}
+
+function dataUri(file: MediaFile): string {
+  return `data:${file.mimeType};base64,${file.data.toString("base64")}`;
 }
 
 async function callAnthropic(request: Request): Promise<Answer> {
@@ -130,7 +126,7 @@ async function callOpenRouterImage(request: Request): Promise<void> {
   const headers = new Headers(request.headers);
   if (request.apiKey && !headers.has("authorization")) headers.set("authorization", `Bearer ${request.apiKey}`);
   headers.set("content-type", "application/json");
-  const response = await fetch(`${(request.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/$/, "")}/images`, {
+  const response = await fetch(`${request.baseUrl!.replace(/\/$/, "")}/images`, {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -140,7 +136,7 @@ async function callOpenRouterImage(request: Request): Promise<void> {
       ...(request.files.length ? {
         input_references: request.files.map((file) => ({
           type: "image_url",
-          image_url: { url: `data:${file.mimeType};base64,${file.data.toString("base64")}` },
+          image_url: { url: dataUri(file) },
         })),
       } : {}),
     }),
@@ -198,10 +194,10 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
       } else if (file.kind === "document") {
         content.push({
           type: "file",
-          file: { filename: file.name, file_data: `data:${file.mimeType};base64,${file.data.toString("base64")}` },
+          file: { filename: file.name, file_data: dataUri(file) },
         });
       } else {
-        content.push({ type: "image_url", image_url: { url: `data:${file.mimeType};base64,${file.data.toString("base64")}` } });
+        content.push({ type: "image_url", image_url: { url: dataUri(file) } });
       }
     }
     const response = await client.chat.completions.create({
@@ -230,12 +226,12 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
       ? {
         type: "input_file",
         filename: file.name,
-        file_data: `data:${file.mimeType};base64,${file.data.toString("base64")}`,
+        file_data: dataUri(file),
       }
       : {
         type: "input_image",
         detail: "auto",
-        image_url: `data:${file.mimeType};base64,${file.data.toString("base64")}`,
+        image_url: dataUri(file),
       });
   }
   const response = await client.responses.create({
@@ -268,35 +264,29 @@ async function callGoogle(request: Request): Promise<Answer | undefined> {
   }
   if (vertex && !baseUrl && !vertexApiKey && !location) throw new Error("Vertex requires GOOGLE_CLOUD_LOCATION");
   const versionedBaseUrl = baseUrl && new URL(baseUrl).pathname.split("/").some((part) => /^v\d+(?:beta\d*)?$/.test(part));
-  const client = new GoogleGenAI(vertex
-    ? {
-      vertexai: true,
-      ...(vertexApiKey ? { apiKey: vertexApiKey } : {
+  const httpOptions = {
+    headers: request.headers,
+    retryOptions: { attempts: 1 },
+    ...(baseUrl ? {
+      baseUrl,
+      ...(vertex ? { baseUrlResourceScope: ResourceScope.COLLECTION } : {}),
+    } : {}),
+    ...(versionedBaseUrl ? { apiVersion: "" } : {}),
+  };
+  const client = new GoogleGenAI({
+    vertexai: vertex,
+    ...(vertex
+      ? vertexApiKey ? { apiKey: vertexApiKey } : {
         project,
         location,
         ...(request.env.GOOGLE_APPLICATION_CREDENTIALS ? {
           googleAuthOptions: { keyFilename: request.env.GOOGLE_APPLICATION_CREDENTIALS },
         } : {}),
-      }),
-      apiVersion: "v1",
-      httpOptions: {
-        headers: request.headers,
-        retryOptions: { attempts: 1 },
-        ...(baseUrl ? { baseUrl, baseUrlResourceScope: ResourceScope.COLLECTION } : {}),
-        ...(versionedBaseUrl ? { apiVersion: "" } : {}),
-      },
-    }
-    : {
-      vertexai: false,
-      apiKey: request.apiKey ?? "pi-auth",
-      apiVersion: "v1beta",
-      httpOptions: {
-        headers: request.headers,
-        retryOptions: { attempts: 1 },
-        ...(baseUrl ? { baseUrl } : {}),
-        ...(versionedBaseUrl ? { apiVersion: "" } : {}),
-      },
-    });
+      }
+      : { apiKey: request.apiKey ?? "pi-auth" }),
+    apiVersion: vertex ? "v1" : "v1beta",
+    httpOptions,
+  });
   const response = await client.models.generateContent({
     model: request.modelId,
     contents: [{ role: "user", parts: [
@@ -358,7 +348,7 @@ export default function (pi: ExtensionAPI): void {
         if (!auth.ok) throw new Error(auth.error);
         resolved = auth;
       } else {
-        const auth = await ctx.modelRegistry.getProviderAuth(providerId) as RequestAuth | undefined;
+        const auth = await ctx.modelRegistry.getProviderAuth(providerId);
         if (!auth) throw new Error(`Provider has no configured authentication: ${providerId}`);
         resolved = { ...auth.auth, env: auth.env };
       }
@@ -393,17 +383,18 @@ export default function (pi: ExtensionAPI): void {
         const media = MEDIA[path.extname(filePath).toLowerCase() as keyof typeof MEDIA];
         if (!media) throw new Error(`Unsupported file: ${file}`);
         const name = path.basename(filePath);
-        if (!allowed.includes(media[1])) {
-          throw new Error(`ask ${api} serializer does not support ${media[1]} input: ${name}`);
+        const [mimeType, kind] = media;
+        if (!allowed.includes(kind)) {
+          throw new Error(`ask ${api} serializer does not support ${kind} input: ${name}`);
         }
-        if (output && !openRouterImage && media[0] === "image/gif" && (api === "openai-completions" || api === "openai-responses")) {
+        if (output && !openRouterImage && mimeType === "image/gif" && (api === "openai-completions" || api === "openai-responses")) {
           throw new Error(`OpenAI image generation does not support GIF input: ${name}`);
         }
         return {
           data: await readFile(filePath),
           name,
-          mimeType: media[0],
-          kind: media[1],
+          mimeType,
+          kind,
         };
       }));
 
