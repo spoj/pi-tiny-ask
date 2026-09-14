@@ -163,7 +163,7 @@ test("preserves configured Vercel gateway routing", async (t) => {
 });
 
 test("preserves OpenRouter image routing without forwarding text sampling parameters", async (t) => {
-  const routing = { only: ["bytedance"], allow_fallbacks: false };
+  const routing = { only: ["bytedance"], allow_fallbacks: false, options: { bytedance: { seed: 123 } } };
   const { run, requests } = await fixture(t, "openrouter", undefined, {
     api: "openai-completions",
     compat: { openRouterRouting: routing },

@@ -291,7 +291,7 @@ async function callGoogle(request: Request): Promise<Answer | undefined> {
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(request.headers)) {
     if (value === null) {
-      if (["authorization", "x-goog-api-key", "content-type", "user-agent", "x-goog-api-client"].includes(name)) {
+      if (["authorization", "x-goog-api-key", "content-type", "user-agent", "x-goog-api-client", "x-goog-user-project"].includes(name)) {
         throw new Error(`Google SDK cannot suppress configured header: ${name}`);
       }
       continue;
@@ -428,7 +428,7 @@ export default function (pi: ExtensionAPI): void {
           throw new Error(`ask cannot preserve configured gateway routing for ${output ? "image generation with " : ""}${api}`);
         }
         const unsupported = Object.keys(compat?.openRouterRouting ?? {}).find((key) =>
-          !["only", "order", "ignore", "sort", "allow_fallbacks"].includes(key));
+          !["only", "order", "ignore", "sort", "allow_fallbacks", "options"].includes(key));
         if (unsupported) throw new Error(`OpenRouter images do not support configured routing option: ${unsupported}`);
       }
       const env = { ...process.env, ...resolved.env };

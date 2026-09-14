@@ -251,7 +251,7 @@ test("preserves Google header overrides without duplicating SDK defaults", async
   assert.equal(requests[0].headers.get("x-remove"), null);
 });
 
-for (const header of ["authorization", "x-goog-api-key", "content-type", "user-agent", "x-goog-api-client"]) {
+for (const header of ["authorization", "x-goog-api-key", "content-type", "user-agent", "x-goog-api-client", "x-goog-user-project"]) {
   test(`rejects unsupported Google SDK header removal: ${header}`, async (t) => {
     const { run, requests } = await fixture(t, "google-generative-ai", true, "custom", {
       auth: { apiKey: "test-key", headers: { [header]: null } },
@@ -260,6 +260,18 @@ for (const header of ["authorization", "x-goog-api-key", "content-type", "user-a
     assert.equal(requests.length, 0);
   });
 }
+
+test("rejects Vertex quota-project header removal before ADC authentication", async (t) => {
+  setEnv(t, "GOOGLE_CLOUD_PROJECT", "test-project");
+  setEnv(t, "GOOGLE_CLOUD_LOCATION", "us-central1");
+  const { run, requests, cwd } = await fixture(t, "google-vertex", true, "google-vertex", {
+    baseUrl: "https://{location}-aiplatform.googleapis.com",
+    auth: { headers: { "x-goog-user-project": null } },
+  });
+  setEnv(t, "GOOGLE_APPLICATION_CREDENTIALS", path.join(cwd, "missing-credentials.json"));
+  await assert.rejects(run({}), /Google SDK cannot suppress configured header: x-goog-user-project/);
+  assert.equal(requests.length, 0);
+});
 
 test("keeps non-Vertex Google serialization when ambient vertex flags are set", async (t) => {
   setEnv(t, "GOOGLE_GENAI_USE_VERTEXAI", "true");
