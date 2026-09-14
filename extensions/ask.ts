@@ -4,7 +4,7 @@ import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { truncateHead, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FinishReason, GoogleGenAI, Modality, ResourceScope } from "@google/genai";
-import { StringEnum, type Api, type Model } from "@earendil-works/pi-ai";
+import { StringEnum, type Api, type Model, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import OpenAI, { toFile } from "openai";
 import { Type } from "typebox";
 
@@ -56,6 +56,8 @@ type Request = {
   modelId: string;
   output?: string;
   prompt: string;
+  routing: Record<string, unknown>;
+  samplingParams?: Record<string, unknown>;
   signal?: AbortSignal;
 };
 type Answer = { text: string; status?: string };
@@ -98,6 +100,7 @@ async function callAnthropic(request: Request): Promise<Answer> {
         },
       });
   }
+  // Anthropic OAuth requires the Claude Code identity as well as bearer auth.
   const oauth = request.apiKey?.includes("sk-ant-oat") ?? false;
   const bearer = oauth || request.providerId === "github-copilot";
   const client = new Anthropic({
@@ -119,6 +122,7 @@ async function callAnthropic(request: Request): Promise<Answer> {
     max_tokens: request.maxTokens ?? 16_384,
     ...(oauth ? { system: "You are Claude Code, Anthropic's official CLI for Claude." } : {}),
     messages: [{ role: "user", content }],
+    ...request.routing,
   }, { signal: request.signal }).finalMessage();
   const status = response.stop_reason === "max_tokens"
     ? "response truncated (max_tokens)"
@@ -148,6 +152,7 @@ async function callOpenRouterImage(request: Request): Promise<void> {
       model: request.modelId,
       prompt: request.prompt,
       n: 1,
+      ...request.routing,
       ...(request.files.length ? {
         input_references: request.files.map((file) => ({
           type: "image_url",
@@ -222,6 +227,8 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
         // Compatible endpoints can accept audio formats beyond the SDK's WAV/MP3 types.
         content: content as OpenAI.Chat.Completions.ChatCompletionContentPart[],
       }],
+      ...request.routing,
+      ...request.samplingParams,
     }, { signal: request.signal });
     const choice = response.choices[0];
     const status = choice?.message.refusal
@@ -252,6 +259,8 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
   const response = await client.responses.create({
     model: request.modelId,
     input: [{ role: "user", content }],
+    ...request.routing,
+    ...request.samplingParams,
   }, { signal: request.signal });
   const refusal = response.output
     .filter((item) => item.type === "message")
@@ -281,7 +290,13 @@ async function callGoogle(request: Request): Promise<Answer | undefined> {
   const versionedBaseUrl = baseUrl && new URL(baseUrl).pathname.split("/").some((part) => /^v\d+(?:beta\d*)?$/.test(part));
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(request.headers)) {
-    if (value !== null) headers[name] = value;
+    if (value === null) {
+      if (["authorization", "x-goog-api-key", "content-type", "user-agent", "x-goog-api-client"].includes(name)) {
+        throw new Error(`Google SDK cannot suppress configured header: ${name}`);
+      }
+      continue;
+    }
+    headers[name === "user-agent" ? "User-Agent" : name === "content-type" ? "Content-Type" : name] = value;
   }
   const httpOptions = {
     headers,
@@ -346,7 +361,7 @@ export default function (pi: ExtensionAPI): void {
     ],
     parameters: Type.Object({
       model: Type.String({ description: "Exact provider/model ID" }),
-      api: Type.Optional(StringEnum(SUPPORTED_APIS, { description: "Override the model's configured API serializer" })),
+      api: Type.Optional(StringEnum(SUPPORTED_APIS, { description: "Override the API serializer; with output, OpenAI values select the Images API" })),
       prompt: Type.String({ description: "What the other model should do" }),
       files: Type.Optional(Type.Array(Type.String(), { description: "Media paths relative to the workspace" })),
       output: Type.Optional(Type.String({ description: "Workspace-relative path for a generated image" })),
@@ -391,6 +406,30 @@ export default function (pi: ExtensionAPI): void {
         throw new Error(api === "openai-codex-responses" || api === "azure-openai-responses"
           ? `ask does not support the ${api} transport`
           : `Unsupported API serialization format: ${api}`);
+      }
+      if (!model && provider.getModels().some((candidate) => {
+        const compat = candidate.compat as OpenAICompletionsCompat | undefined;
+        return compat?.openRouterRouting || compat?.vercelGatewayRouting;
+      })) {
+        throw new Error(`Register ${params.model} to resolve its gateway routing; ask cannot infer it from other models`);
+      }
+      const compat = model?.compat as OpenAICompletionsCompat | undefined;
+      const routing = {
+        ...(compat?.openRouterRouting ? { provider: compat.openRouterRouting } : {}),
+        ...(compat?.vercelGatewayRouting ? { providerOptions: { gateway: compat.vercelGatewayRouting } } : {}),
+      };
+      const openAIText = !output && (api === "openai-completions" || api === "openai-responses");
+      if (openAIText && Object.keys(routing).some((key) => key in (model?.samplingParams ?? {}))) {
+        throw new Error("Configure gateway routing in compat or samplingParams, not both");
+      }
+      const routedText = openAIText || (!output && api === "anthropic-messages");
+      if (Object.keys(routing).length && !routedText) {
+        if (!openRouterImage || compat?.vercelGatewayRouting) {
+          throw new Error(`ask cannot preserve configured gateway routing for ${output ? "image generation with " : ""}${api}`);
+        }
+        const unsupported = Object.keys(compat?.openRouterRouting ?? {}).find((key) =>
+          !["only", "order", "ignore", "sort", "allow_fallbacks"].includes(key));
+        if (unsupported) throw new Error(`OpenRouter images do not support configured routing option: ${unsupported}`);
       }
       const env = { ...process.env, ...resolved.env };
       let baseUrl = resolved.baseUrl ?? model?.baseUrl ?? provider.baseUrl;
@@ -445,6 +484,8 @@ export default function (pi: ExtensionAPI): void {
         modelId,
         output,
         prompt: params.prompt,
+        routing,
+        samplingParams: model?.samplingParams,
         signal,
       };
 

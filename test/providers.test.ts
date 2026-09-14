@@ -8,15 +8,22 @@ import { ModelRegistry, ModelRuntime, type ExtensionAPI, type ExtensionContext, 
 import register from "../extensions/ask.ts";
 import { anthropicResponse } from "./anthropic-response.ts";
 
-async function fixture(t: TestContext, providerId: string, credential: Credential = { type: "api_key", key: "test-key" }) {
+async function fixture(
+  t: TestContext,
+  providerId: string,
+  credential: Credential = { type: "api_key", key: "test-key" },
+  config?: Record<string, unknown>,
+) {
   const cwd = await mkdtemp(path.join(tmpdir(), "tiny-ask-providers-"));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   await writeFile(path.join(cwd, "photo.png"), "image");
   await writeFile(path.join(cwd, "report.pdf"), "pdf");
   const credentials = new InMemoryCredentialStore();
   await credentials.modify(providerId, async () => credential);
+  const modelsPath = path.join(cwd, "models.json");
+  if (config) await writeFile(modelsPath, JSON.stringify({ providers: { [providerId]: config } }));
   const runtime = await ModelRuntime.create({
-    credentials, modelsPath: null, modelsStore: new InMemoryModelsStore(), refreshOnCreate: false,
+    credentials, modelsPath, modelsStore: new InMemoryModelsStore(), refreshOnCreate: false,
   });
   const modelRegistry = new ModelRegistry(runtime);
   let tool!: ToolDefinition;
@@ -108,4 +115,93 @@ test("materializes Cloudflare Workers AI endpoints without suppressing bearer au
   await run(model.id);
   assert.equal(requests[0].url, "https://api.cloudflare.com/client/v4/accounts/account-123/ai/v1/chat/completions");
   assert.equal(requests[0].headers.get("authorization"), "Bearer cloudflare-token");
+});
+
+for (const api of ["openai-completions", "openai-responses"]) {
+  test(`preserves configured OpenRouter routing for ${api}`, async (t) => {
+    const routing = { only: ["google-ai-studio"], allow_fallbacks: false, data_collection: "deny", zdr: true };
+    const { run, requests, runtime } = await fixture(t, "openrouter", undefined, {
+      compat: { openRouterRouting: routing },
+    });
+    const model = runtime.getModels("openrouter").find((model) => model.api === "openai-completions")!;
+    await run(model.id, { api, files: ["photo.png"] });
+    assert.deepEqual(requests[0].body.provider, routing);
+    assert.equal(requests[0].body.model, model.id);
+  });
+
+  test(`preserves configured OpenAI sampling parameters for ${api}`, async (t) => {
+    const { run, requests } = await fixture(t, "openai", undefined, {
+      modelOverrides: { "gpt-4o": { samplingParams: { temperature: 0.25, top_p: 0.8 } } },
+    });
+    await run("gpt-4o", { api });
+    assert.equal(requests[0].body.temperature, 0.25);
+    assert.equal(requests[0].body.top_p, 0.8);
+  });
+}
+
+test("preserves OpenRouter routing with an Anthropic Messages override", async (t) => {
+  const routing = { only: ["anthropic"], data_collection: "deny", zdr: true };
+  const { run, requests, runtime } = await fixture(t, "openrouter", undefined, {
+    baseUrl: "https://openrouter.ai/api", compat: { openRouterRouting: routing },
+  });
+  const model = runtime.getModels("openrouter")[0];
+  await run(model.id, { api: "anthropic-messages" });
+  assert.equal(requests[0].url, "https://openrouter.ai/api/v1/messages");
+  assert.deepEqual(requests[0].body.provider, routing);
+});
+
+test("preserves configured Vercel gateway routing", async (t) => {
+  const routing = { only: ["bedrock"], order: ["bedrock"] };
+  const { run, requests, runtime } = await fixture(t, "vercel-ai-gateway", undefined, {
+    compat: { vercelGatewayRouting: routing },
+  });
+  const model = runtime.getModels("vercel-ai-gateway")[0];
+  assert.equal(model.api, "anthropic-messages");
+  await run(model.id, { files: ["photo.png", "report.pdf"] });
+  assert.equal(requests[0].url, "https://ai-gateway.vercel.sh/v1/messages");
+  assert.deepEqual(requests[0].body.providerOptions, { gateway: routing });
+});
+
+test("preserves OpenRouter image routing without forwarding text sampling parameters", async (t) => {
+  const routing = { only: ["bytedance"], allow_fallbacks: false };
+  const { run, requests } = await fixture(t, "openrouter", undefined, {
+    api: "openai-completions",
+    compat: { openRouterRouting: routing },
+    models: [{ id: "bytedance-seed/seedream-4.5", samplingParams: { temperature: 0.25 } }],
+  });
+  await run("bytedance-seed/seedream-4.5", { output: "image.png" });
+  assert.equal(requests[0].url, "https://openrouter.ai/api/v1/images");
+  assert.deepEqual(requests[0].body.provider, routing);
+  assert.equal(requests[0].body.temperature, undefined);
+});
+
+test("rejects overrides that cannot preserve gateway routing before sending media", async (t) => {
+  const { run, requests, runtime } = await fixture(t, "openrouter", undefined, {
+    compat: { openRouterRouting: { only: ["google-ai-studio"], data_collection: "deny" } },
+  });
+  const model = runtime.getModels("openrouter")[0];
+  for (const api of ["google-generative-ai", "google-vertex"]) {
+    await assert.rejects(run(model.id, { api, files: ["missing.pdf"] }), /cannot preserve configured gateway routing/);
+  }
+  await assert.rejects(run(model.id, { api: "openai-responses", output: "image.png" }), /cannot preserve configured gateway routing/);
+  await assert.rejects(run(model.id, { output: "image.png" }), /OpenRouter images do not support configured routing option: data_collection/);
+  await assert.rejects(run("unknown-image-model", { output: "image.png" }), /Register .* to resolve its gateway routing/);
+  await assert.rejects(run("unknown-text-model", { api: "openai-completions" }), /Register .* to resolve its gateway routing/);
+  assert.equal(requests.length, 0);
+});
+
+test("allows unregistered OpenRouter image models when no routing is configured", async (t) => {
+  const { run, requests } = await fixture(t, "openrouter");
+  await run("unknown-image-model", { output: "image.png" });
+  assert.equal(requests[0].url, "https://openrouter.ai/api/v1/images");
+});
+
+test("rejects sampling parameters that overwrite configured routing", async (t) => {
+  const { run, requests } = await fixture(t, "openrouter", undefined, {
+    api: "openai-completions",
+    compat: { openRouterRouting: { only: ["google-ai-studio"], data_collection: "deny" } },
+    models: [{ id: "test-model", samplingParams: { provider: { data_collection: "allow" } } }],
+  });
+  await assert.rejects(run("test-model"), /Configure gateway routing in compat or samplingParams, not both/);
+  assert.equal(requests.length, 0);
 });
