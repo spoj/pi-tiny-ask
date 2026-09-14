@@ -308,6 +308,19 @@ test("uses a built-in-style configured endpoint when no override is given", asyn
   assert.equal(requests[0].url, "https://api.openai.com/v1/chat/completions");
 });
 
+test("allows header-authenticated Vertex gateways with a configured endpoint", async (t) => {
+  setEnv(t, "GOOGLE_CLOUD_PROJECT", "");
+  setEnv(t, "GOOGLE_CLOUD_LOCATION", "");
+  setEnv(t, "GOOGLE_APPLICATION_CREDENTIALS", "");
+  const { run, requests } = await fixture(t, "google-vertex", true, "custom", {
+    auth: { headers: { "x-proxy-key": "proxy-secret" } },
+  });
+  await run({ files: ["photo.png"] });
+  assert.equal(requests[0].headers.get("x-proxy-key"), "proxy-secret");
+  assert.equal(requests[0].headers.get("x-goog-api-key"), "pi-auth");
+  assert.match(requests[0].url, /^https:\/\/gateway\.test\/v1\/.*generateContent/);
+});
+
 test("allows Vertex native endpoint derivation without a configured endpoint", async (t) => {
   const { run, requests } = await fixture(t, "google-vertex", true, "google-vertex", { baseUrl: "" });
   const result = await run({ files: ["photo.png"] });

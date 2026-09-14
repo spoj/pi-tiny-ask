@@ -260,16 +260,17 @@ async function callGoogle(request: Request): Promise<Answer | undefined> {
   const vertex = request.api === "google-vertex";
   const project = request.env.GOOGLE_CLOUD_PROJECT ?? request.env.GCLOUD_PROJECT;
   const location = request.env.GOOGLE_CLOUD_LOCATION;
-  if (vertex && !request.apiKey && !project) {
+  const baseUrl = request.baseUrl?.includes("{location}") ? undefined : request.baseUrl;
+  const vertexApiKey = request.apiKey ?? (vertex && baseUrl && (!project || !location) ? "pi-auth" : undefined);
+  if (vertex && !baseUrl && !vertexApiKey && !project) {
     throw new Error("Vertex requires GOOGLE_CLOUD_PROJECT or GCLOUD_PROJECT");
   }
-  if (vertex && !request.apiKey && !location) throw new Error("Vertex requires GOOGLE_CLOUD_LOCATION");
-  const baseUrl = request.baseUrl?.includes("{location}") ? undefined : request.baseUrl;
+  if (vertex && !baseUrl && !vertexApiKey && !location) throw new Error("Vertex requires GOOGLE_CLOUD_LOCATION");
   const versionedBaseUrl = baseUrl && new URL(baseUrl).pathname.split("/").some((part) => /^v\d+(?:beta\d*)?$/.test(part));
   const client = new GoogleGenAI(vertex
     ? {
       vertexai: true,
-      ...(request.apiKey ? { apiKey: request.apiKey } : {
+      ...(vertexApiKey ? { apiKey: vertexApiKey } : {
         project,
         location,
         ...(request.env.GOOGLE_APPLICATION_CREDENTIALS ? {
