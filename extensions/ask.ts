@@ -1,7 +1,8 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { truncateHead, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FinishReason, GoogleGenAI, Modality, ResourceScope } from "@google/genai";
 import { StringEnum, type Api, type Model } from "@earendil-works/pi-ai";
 import OpenAI, { toFile } from "openai";
@@ -328,7 +329,7 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "ask",
     label: "Tiny Ask",
-    description: "Send one prompt and local media files to a configured Anthropic, OpenAI-compatible, Google, or Google Vertex model. Set output to generate an image.",
+    description: "Send one prompt and local media files to a configured Anthropic, OpenAI-compatible, Google, or Google Vertex model. Set output to generate an image. Text previews are limited to 50 KiB or 2,000 lines; larger responses are saved to a temp file for reading in sections.",
     promptSnippet: "Inspect local media or generate an image with a configured model",
     promptGuidelines: [
       "Use ask when a task needs image, audio, video, or PDF understanding that would benefit from another model.",
@@ -436,10 +437,19 @@ export default function (pi: ExtensionAPI): void {
 
       const text = answer?.text ?? "";
       const status = answer?.status;
-      const result = status ? (text ? `${text}\n\n[ask: ${status}]` : `[ask: ${status}]`) : text;
+      let result = text;
+      let fullOutputPath: string | undefined;
+      const preview = truncateHead(text);
+      if (preview.truncated) {
+        const directory = await mkdtemp(path.join(tmpdir(), "pi-ask-"));
+        fullOutputPath = path.join(directory, "response.txt");
+        await writeFile(fullOutputPath, text, "utf8");
+        result = `${preview.content}\n\n[ask: response preview truncated. Full response: ${fullOutputPath}. Use read with offset and limit to read sections.]`;
+      }
+      if (status) result = result ? `${result}\n\n[ask: ${status}]` : `[ask: ${status}]`;
       return {
         content: [{ type: "text", text: output ? `Image saved to ${params.output}` : result }],
-        details: { model: params.model, files: params.files ?? [], output: params.output, status },
+        details: { model: params.model, files: params.files ?? [], output: params.output, status, fullOutputPath },
       };
     },
   });

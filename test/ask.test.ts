@@ -328,6 +328,45 @@ test("allows Vertex native endpoint derivation without a configured endpoint", a
   assert.match(requests[0].url, /^https:\/\/aiplatform\.googleapis\.com\//);
 });
 
+for (const [name, answer] of [
+  ["line limit", Array.from({ length: 2001 }, (_, i) => `line ${i + 1}`).join("\n")],
+  ["UTF-8 byte limit", Array.from({ length: 100 }, () => "終".repeat(200)).join("\n")],
+]) {
+  test(`spills the complete response when its preview exceeds the ${name}`, async (t) => {
+    const { run, requests } = await fixture(t, "openai-completions", true, "custom", {
+      respond: () => Response.json({ choices: [{ message: { content: answer }, finish_reason: "length" }] }),
+    });
+    const result = await run({});
+    const { fullOutputPath } = result.details as { fullOutputPath: string };
+    t.after(() => rm(path.dirname(fullOutputPath), { recursive: true, force: true }));
+    assert.equal(await readFile(fullOutputPath, "utf8"), answer);
+    const preview = textOf(result).split("\n\n[ask: response preview truncated.")[0];
+    assert.ok(answer.startsWith(preview));
+    assert.ok(Buffer.byteLength(preview) <= 50 * 1024);
+    assert.ok(preview.split("\n").length <= 2000);
+    assert.match(textOf(result), /Use read with offset and limit/);
+    assert.ok(textOf(result).includes(fullOutputPath));
+    assert.match(textOf(result), /\[ask: response truncated \(length\)\]$/);
+    assert.equal(requests[0].body.max_tokens, undefined);
+    assert.equal(requests[0].body.max_completion_tokens, undefined);
+  });
+}
+
+for (const [name, answer] of [
+  ["short", "complete answer"],
+  ["exact byte limit", "x".repeat(50 * 1024)],
+  ["exact line limit", Array.from({ length: 2000 }, () => "line").join("\n")],
+]) {
+  test(`returns a ${name} response without spilling`, async (t) => {
+    const { run } = await fixture(t, "openai-completions", true, "custom", {
+      respond: () => Response.json({ choices: [{ message: { content: answer }, finish_reason: "stop" }] }),
+    });
+    const result = await run({});
+    assert.equal(textOf(result), answer);
+    assert.equal((result.details as { fullOutputPath?: string }).fullOutputPath, undefined);
+  });
+}
+
 test("reports truncated and refused provider responses with an explicit status", async (t) => {
   const chat = await fixture(t, "openai-completions", true, "custom", {
     respond: () => Response.json({ choices: [{ message: { content: "partial" }, finish_reason: "length" }] }),

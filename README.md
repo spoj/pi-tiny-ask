@@ -25,6 +25,8 @@ Each call sends one prompt and all files in one native SDK request. Anthropic Me
 
 Requests use the provider's configured endpoint; providers without one are rejected rather than falling back to an SDK default, except Google Vertex, which derives its own endpoint. Azure OpenAI and Codex transports are not supported; use Pi directly for those providers. Truncated, filtered, or refused responses return any partial text plus an explicit `[ask: ...]` status note.
 
+Text responses up to 50 KiB / 2,000 lines are returned directly. Larger responses return a head preview and the path to the complete response in a temporary file; use `read` with `offset` and `limit` to inspect sections. This limits model-context output, not generation. Provider truncation or refusal notices remain visible beside the preview. Response files remain available until normal operating-system temp cleanup.
+
 The tool can also generate an image with pi's configured Google, Google Vertex, OpenAI, or OpenRouter authentication. Set `output` to the workspace-relative path where the image should be saved. Examples are `google/gemini-3.1-flash-image`, `google-vertex/gemini-3.1-flash-image`, `openai/gpt-image-2`, and `openrouter/bytedance-seed/seedream-4.5`. All four accept optional reference images through `files`; OpenAI uses its image edit API, while OpenRouter uses its image endpoint only when no explicit `api` override is supplied. Vertex generation supports a configured API key or ADC with project and location.
 
 ## Install locally
