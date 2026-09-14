@@ -3,37 +3,21 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { googleProvider } from "@earendil-works/pi-ai/providers/google";
-import { googleVertexProvider } from "@earendil-works/pi-ai/providers/google-vertex";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { ModelRegistry, ModelRuntime, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import register from "../extensions/ask.ts";
 
-const providers = {
-  google: googleProvider,
-  "google-vertex": googleVertexProvider,
-  openai: openaiProvider,
-};
-
-async function fixture(t: TestContext, providerId: keyof typeof providers, modelId: string) {
+async function fixture(t: TestContext, providerId: string, modelId: string) {
   const cwd = await mkdtemp(path.join(tmpdir(), "tiny-ask-images-"));
   t.after(() => rm(cwd, { recursive: true, force: true }));
-  const provider = providers[providerId]();
+  const credentials = new InMemoryCredentialStore();
+  await credentials.modify(providerId, async () => ({ type: "api_key", key: "test-key" }));
+  const runtime = await ModelRuntime.create({
+    credentials, modelsPath: null, modelsStore: new InMemoryModelsStore(), refreshOnCreate: false,
+  });
   let tool!: ToolDefinition;
   register({ registerTool(definition: ToolDefinition) { tool = definition; } } as ExtensionAPI);
-  const ctx = {
-    cwd,
-    modelRegistry: {
-      find: (id: string, candidateId: string) => id === providerId
-        ? provider.getModels().find((model) => model.id === candidateId)
-        : undefined,
-      getProvider: (id: string) => id === providerId ? provider : undefined,
-      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key" }),
-      getProviderAuth: async (id: string) => id === providerId
-        ? { auth: { apiKey: "test-key" }, source: "test" }
-        : undefined,
-    },
-  } as unknown as ExtensionContext;
+  const ctx = { cwd, modelRegistry: new ModelRegistry(runtime) } as ExtensionContext;
   return {
     cwd,
     run: (params: Record<string, unknown>) => tool.execute("test", {
@@ -142,5 +126,6 @@ test("OpenAI downloads URL image responses", async (t) => {
     imageUrl,
   ]);
   assert.equal(requests[1].method, "GET");
+  assert.equal(requests[1].headers.get("authorization"), null);
   assert.deepEqual(await readFile(path.join(cwd, "downloaded.png")), image);
 });
