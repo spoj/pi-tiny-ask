@@ -267,6 +267,15 @@ test("preserves a resolved authorization header for OpenRouter image requests", 
   assert.equal(await readFile(path.join(cwd, "image.png"), "utf8"), "image");
 });
 
+test("preserves an explicit OpenRouter authorization header when a key is also resolved", async (t) => {
+  const { run, requests, cwd } = await fixture(t, "openai-completions", false, "openrouter", {
+    auth: { apiKey: "resolved-key", headers: { authorization: "Bearer explicit-header" } },
+  });
+  await run({ output: "image.png" });
+  assert.equal(requests[0].headers.get("authorization"), "Bearer explicit-header");
+  assert.equal(await readFile(path.join(cwd, "image.png"), "utf8"), "image");
+});
+
 test("rejects Azure and Codex transports but keeps them out of the API enum", async (t) => {
   const codex = await fixture(t, "openai-codex-responses");
   assert.ok(!Reflect.get(codex.tool.parameters, "properties").api.enum.includes("openai-codex-responses"));
@@ -371,6 +380,14 @@ test("reports explicit model refusals", async (t) => {
   });
   const anthropicResult = await anthropic.run({ files: ["photo.png"] });
   assert.equal(textOf(anthropicResult), "[ask: model refused the request]");
+});
+
+test("does not retry Google SDK requests", async (t) => {
+  const google = await fixture(t, "google-generative-ai", true, "custom", {
+    respond: () => Response.json({ error: { message: "server error" } }, { status: 500 }),
+  });
+  await assert.rejects(google.run({ files: ["photo.png"] }));
+  assert.equal(google.requests.length, 1);
 });
 
 test("does not retry SDK requests and honors a pre-aborted signal", async (t) => {

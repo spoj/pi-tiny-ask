@@ -127,7 +127,7 @@ async function callAnthropic(request: Request): Promise<Answer> {
 
 async function callOpenRouterImage(request: Request): Promise<void> {
   const headers = new Headers(request.headers);
-  if (request.apiKey) headers.set("authorization", `Bearer ${request.apiKey}`);
+  if (request.apiKey && !headers.has("authorization")) headers.set("authorization", `Bearer ${request.apiKey}`);
   headers.set("content-type", "application/json");
   const response = await fetch(`${(request.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/$/, "")}/images`, {
     method: "POST",
@@ -279,6 +279,7 @@ async function callGoogle(request: Request): Promise<Answer | undefined> {
       apiVersion: "v1",
       httpOptions: {
         headers: request.headers,
+        retryOptions: { attempts: 1 },
         ...(baseUrl ? { baseUrl, baseUrlResourceScope: ResourceScope.COLLECTION } : {}),
         ...(versionedBaseUrl ? { apiVersion: "" } : {}),
       },
@@ -289,6 +290,7 @@ async function callGoogle(request: Request): Promise<Answer | undefined> {
       apiVersion: "v1beta",
       httpOptions: {
         headers: request.headers,
+        retryOptions: { attempts: 1 },
         ...(baseUrl ? { baseUrl } : {}),
         ...(versionedBaseUrl ? { apiVersion: "" } : {}),
       },
