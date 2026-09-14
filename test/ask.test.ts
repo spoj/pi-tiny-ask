@@ -265,6 +265,29 @@ test("preserves an explicit OpenRouter authorization header when a key is also r
   assert.equal(await readFile(path.join(cwd, "image.png"), "utf8"), "image");
 });
 
+for (const api of ["anthropic-messages", "openai-completions", "openai-responses"]) {
+  test(`preserves case-insensitive auth header removals for ${api}`, async (t) => {
+    const { run, requests } = await fixture(t, api, true, "custom", {
+      providerHeaders: { Authorization: "Bearer stale", "X-API-Key": "stale" },
+      auth: { apiKey: "resolved-key", headers: { authorization: null, "x-api-key": null, "x-proxy-key": "proxy-key" } },
+    });
+    await run({});
+    assert.equal(requests[0].headers.get("authorization"), null);
+    assert.equal(requests[0].headers.get("x-api-key"), null);
+    assert.equal(requests[0].headers.get("x-proxy-key"), "proxy-key");
+  });
+}
+
+test("preserves explicit authorization removal for OpenRouter images", async (t) => {
+  const { run, requests } = await fixture(t, "openai-completions", false, "openrouter", {
+    providerHeaders: { Authorization: "Bearer stale" },
+    auth: { apiKey: "resolved-key", headers: { authorization: null, "x-proxy-key": "proxy-key" } },
+  });
+  await run({ output: "image.png" });
+  assert.equal(requests[0].headers.get("authorization"), null);
+  assert.equal(requests[0].headers.get("x-proxy-key"), "proxy-key");
+});
+
 test("rejects Azure and Codex transports but keeps them out of the API enum", async (t) => {
   const codex = await fixture(t, "openai-codex-responses");
   assert.ok(!Reflect.get(codex.tool.parameters, "properties").api.enum.includes("openai-codex-responses"));

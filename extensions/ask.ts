@@ -50,8 +50,9 @@ type Request = {
   baseUrl?: string;
   env: Record<string, string | undefined>;
   files: MediaFile[];
-  headers: Record<string, string>;
+  headers: Record<string, string | null>;
   maxTokens?: number;
+  providerId: string;
   modelId: string;
   output?: string;
   prompt: string;
@@ -97,16 +98,26 @@ async function callAnthropic(request: Request): Promise<Answer> {
         },
       });
   }
+  const oauth = request.apiKey?.includes("sk-ant-oat") ?? false;
+  const bearer = oauth || request.providerId === "github-copilot";
   const client = new Anthropic({
-    apiKey: request.apiKey ?? "pi-auth",
-    authToken: null,
+    apiKey: bearer ? null : request.apiKey ?? "pi-auth",
+    authToken: bearer ? request.apiKey ?? null : null,
     baseURL: request.baseUrl,
-    defaultHeaders: request.headers,
+    defaultHeaders: {
+      ...(oauth ? {
+        "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+        "user-agent": "claude-cli/2.1.75",
+        "x-app": "cli",
+      } : {}),
+      ...request.headers,
+    },
     maxRetries: 0,
   });
   const response = await client.messages.stream({
     model: request.modelId,
     max_tokens: request.maxTokens ?? 16_384,
+    ...(oauth ? { system: "You are Claude Code, Anthropic's official CLI for Claude." } : {}),
     messages: [{ role: "user", content }],
   }, { signal: request.signal }).finalMessage();
   const status = response.stop_reason === "max_tokens"
@@ -123,8 +134,12 @@ async function callAnthropic(request: Request): Promise<Answer> {
 }
 
 async function callOpenRouterImage(request: Request): Promise<void> {
-  const headers = new Headers(request.headers);
-  if (request.apiKey && !headers.has("authorization")) headers.set("authorization", `Bearer ${request.apiKey}`);
+  const headers = new Headers();
+  if (request.apiKey) headers.set("authorization", `Bearer ${request.apiKey}`);
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (value === null) headers.delete(name);
+    else headers.set(name, value);
+  }
   headers.set("content-type", "application/json");
   const response = await fetch(`${request.baseUrl!.replace(/\/$/, "")}/images`, {
     method: "POST",
@@ -264,8 +279,12 @@ async function callGoogle(request: Request): Promise<Answer | undefined> {
   }
   if (vertex && !baseUrl && !vertexApiKey && !location) throw new Error("Vertex requires GOOGLE_CLOUD_LOCATION");
   const versionedBaseUrl = baseUrl && new URL(baseUrl).pathname.split("/").some((part) => /^v\d+(?:beta\d*)?$/.test(part));
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (value !== null) headers[name] = value;
+  }
   const httpOptions = {
-    headers: request.headers,
+    headers,
     retryOptions: { attempts: 1 },
     ...(baseUrl ? {
       baseUrl,
@@ -373,7 +392,15 @@ export default function (pi: ExtensionAPI): void {
           ? `ask does not support the ${api} transport`
           : `Unsupported API serialization format: ${api}`);
       }
-      const baseUrl = resolved.baseUrl ?? model?.baseUrl ?? provider.baseUrl;
+      const env = { ...process.env, ...resolved.env };
+      let baseUrl = resolved.baseUrl ?? model?.baseUrl ?? provider.baseUrl;
+      if (providerId === "cloudflare-ai-gateway" || providerId === "cloudflare-workers-ai") {
+        for (const name of ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID"]) {
+          if (!baseUrl?.includes(`{${name}}`)) continue;
+          if (!env[name]) throw new Error(`Provider endpoint requires ${name}`);
+          baseUrl = baseUrl.replaceAll(`{${name}}`, env[name]);
+        }
+      }
       const nativeVertex = !params.api && api === "google-vertex";
       if (!baseUrl && !nativeVertex) throw new Error(`Provider has no configured endpoint: ${providerId}`);
 
@@ -398,15 +425,20 @@ export default function (pi: ExtensionAPI): void {
         };
       }));
 
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string | null> = providerId === "github-copilot" ? {
+        "x-initiator": "agent",
+        "openai-intent": "conversation-edits",
+        ...(files.some((file) => file.kind === "image") ? { "copilot-vision-request": "true" } : {}),
+      } : {};
       for (const [name, value] of Object.entries({ ...provider.headers, ...resolved.headers })) {
-        if (value !== null) headers[name] = value;
+        headers[name.toLowerCase()] = value;
       }
       const request: Request = {
         api,
-        apiKey: resolved.apiKey === "gcp-vertex-credentials" ? undefined : resolved.apiKey,
+        apiKey: resolved.apiKey,
         baseUrl,
-        env: { ...process.env, ...resolved.env },
+        env,
+        providerId,
         files,
         headers,
         maxTokens: model?.maxTokens,

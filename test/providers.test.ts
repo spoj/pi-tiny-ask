@@ -54,3 +54,58 @@ for (const modelId of ["claude-sonnet-4-5", "claude-opus-4-6"]) {
     assert.deepEqual(result.content, [{ type: "text", text: "ok" }]);
   });
 }
+
+test("uses resolved Anthropic OAuth as bearer auth with the required identity", async (t) => {
+  const token = "sk-ant-oat-test-token";
+  const { run, requests } = await fixture(t, "anthropic", {
+    type: "oauth", access: token, refresh: "unused", expires: Date.now() + 3_600_000,
+  });
+  await run("claude-sonnet-4-5", { files: ["photo.png"] });
+  assert.equal(requests[0].headers.get("authorization"), `Bearer ${token}`);
+  assert.equal(requests[0].headers.get("x-api-key"), null);
+  assert.match(requests[0].headers.get("anthropic-beta")!, /oauth-2025-04-20/);
+  assert.match(requests[0].headers.get("user-agent")!, /^claude-cli\//);
+  assert.equal(requests[0].body.system, "You are Claude Code, Anthropic's official CLI for Claude.");
+});
+
+for (const [api, route] of [
+  ["anthropic-messages", "anthropic/v1/messages"],
+  ["openai-completions", "compat/chat/completions"],
+  ["openai-responses", "openai/responses"],
+]) {
+  test(`preserves Copilot bearer auth and vision headers for ${api}`, async (t) => {
+    const { run, requests, runtime } = await fixture(t, "github-copilot");
+    const model = runtime.getModels("github-copilot").find((model) => model.api === api)!;
+    assert.ok(model);
+    await run(model.id, { files: ["photo.png"] });
+    assert.equal(requests[0].headers.get("authorization"), "Bearer test-key");
+    assert.equal(requests[0].headers.get("x-api-key"), null);
+    assert.equal(requests[0].headers.get("copilot-vision-request"), "true");
+    assert.equal(requests[0].headers.get("x-initiator"), "agent");
+    assert.equal(requests[0].headers.get("editor-version"), model.headers!["Editor-Version"]);
+  });
+
+  test(`materializes Cloudflare gateway endpoints and suppresses upstream auth for ${api}`, async (t) => {
+    const { run, requests, runtime } = await fixture(t, "cloudflare-ai-gateway", {
+      type: "api_key", key: "cloudflare-token",
+      env: { CLOUDFLARE_ACCOUNT_ID: "account-123", CLOUDFLARE_GATEWAY_ID: "gateway-123" },
+    });
+    const model = runtime.getModels("cloudflare-ai-gateway").find((model) => model.api === api)!;
+    assert.ok(model);
+    await run(model.id, { files: ["photo.png"] });
+    assert.equal(requests[0].url, `https://gateway.ai.cloudflare.com/v1/account-123/gateway-123/${route}`);
+    assert.equal(requests[0].headers.get("cf-aig-authorization"), "Bearer cloudflare-token");
+    assert.equal(requests[0].headers.get("authorization"), null);
+    assert.equal(requests[0].headers.get("x-api-key"), null);
+  });
+}
+
+test("materializes Cloudflare Workers AI endpoints without suppressing bearer auth", async (t) => {
+  const { run, requests, runtime } = await fixture(t, "cloudflare-workers-ai", {
+    type: "api_key", key: "cloudflare-token", env: { CLOUDFLARE_ACCOUNT_ID: "account-123" },
+  });
+  const model = runtime.getModels("cloudflare-workers-ai")[0];
+  await run(model.id);
+  assert.equal(requests[0].url, "https://api.cloudflare.com/client/v4/accounts/account-123/ai/v1/chat/completions");
+  assert.equal(requests[0].headers.get("authorization"), "Bearer cloudflare-token");
+});
