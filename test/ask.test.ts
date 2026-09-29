@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import register from "../extensions/ask.ts";
 import { anthropicResponse } from "./anthropic-response.ts";
 
@@ -81,7 +81,7 @@ async function fixture(
         : { ok: true, apiKey, headers: { ...providerHeaders, ...authHeaders, ...modelHeaders, ...modelOverrideHeaders }, baseUrl: options.baseUrl },
       getProviderAuth: async () => ({ auth: { apiKey, headers: authHeaders, baseUrl: options.baseUrl } }),
     },
-  } as unknown as ExtensionContext;
+  } as unknown as ExtensionToolContext;
   return {
     cwd, requests, tool,
     run: (params: Record<string, unknown>, signal?: AbortSignal) => tool.execute("test", {

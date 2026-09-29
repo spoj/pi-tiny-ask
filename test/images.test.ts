@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { ModelRegistry, ModelRuntime, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry, ModelRuntime, type ExtensionAPI, type ExtensionToolContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import register from "../extensions/ask.ts";
 
@@ -17,7 +17,7 @@ async function fixture(t: TestContext, providerId: string, modelId: string) {
   });
   let tool!: ToolDefinition;
   register({ registerTool(definition: ToolDefinition) { tool = definition; } } as ExtensionAPI);
-  const ctx = { cwd, modelRegistry: new ModelRegistry(runtime) } as ExtensionContext;
+  const ctx = { cwd, modelRegistry: new ModelRegistry(runtime) } as ExtensionToolContext;
   return {
     cwd,
     run: (params: Record<string, unknown>) => tool.execute("test", {

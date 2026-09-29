@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { InMemoryCredentialStore, InMemoryModelsStore, type Credential } from "@earendil-works/pi-ai";
-import { ModelRegistry, ModelRuntime, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry, ModelRuntime, type ExtensionAPI, type ExtensionToolContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import register from "../extensions/ask.ts";
 import { anthropicResponse } from "./anthropic-response.ts";
 
@@ -43,7 +43,7 @@ async function fixture(
     runtime, modelRegistry, requests,
     run: (modelId: string, params: Record<string, unknown> = {}) => tool.execute("test", {
       model: `${providerId}/${modelId}`, prompt: "inspect these", ...params,
-    }, undefined, undefined, { cwd, modelRegistry } as ExtensionContext),
+    }, undefined, undefined, { cwd, modelRegistry } as ExtensionToolContext),
   };
 }
 
