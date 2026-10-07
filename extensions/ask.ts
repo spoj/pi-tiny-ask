@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
-import { truncateHead, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { truncateHead, withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FinishReason, GoogleGenAI, Modality, ResourceScope } from "@google/genai";
 import { StringEnum, type Api, type Model, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import OpenAI, { toFile } from "openai";
@@ -72,7 +72,7 @@ function generationApi(providerId: string, model: Model<Api> | undefined, provid
 async function saveImage(output: string, data: Buffer): Promise<void> {
   if (data.length === 0) throw new Error("Image provider returned an empty image");
   await mkdir(path.dirname(output), { recursive: true });
-  await writeFile(output, data);
+  await withFileMutationQueue(output, () => writeFile(output, data));
 }
 
 function dataUri(file: MediaFile): string {
