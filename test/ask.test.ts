@@ -389,7 +389,7 @@ for (const [name, answer] of [
     assert.ok(answer.startsWith(preview));
     assert.ok(Buffer.byteLength(preview) <= 50 * 1024);
     assert.ok(preview.split("\n").length <= 2000);
-    assert.match(textOf(result), /Use read with offset and limit/);
+    assert.match(textOf(result), /Full response: /);
     assert.ok(textOf(result).includes(fullOutputPath));
     assert.match(textOf(result), /\[ask: response truncated \(length\)\]$/);
     assert.equal(requests[0].body.max_tokens, undefined);
