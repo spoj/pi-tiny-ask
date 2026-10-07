@@ -66,7 +66,7 @@ async function fixture(
   const modelOverrideHeaders = options.modelOverrideHeaders ?? {};
   const apiKey = options.auth ? options.auth.apiKey : "test-key";
   const authHeaders = options.auth?.headers ?? {};
-  const model = { api: modelApi, headers: modelHeaders };
+  const model = { api: modelApi, headers: modelHeaders, cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0 } };
   const ctx = {
     cwd,
     modelRegistry: {
@@ -89,6 +89,18 @@ async function fixture(
     }, signal, undefined, ctx),
   };
 }
+
+test("reports provider token usage priced by the registered model", async (t) => {
+  const { run } = await fixture(t, "openai-completions", true, "custom", {
+    respond: () => Response.json({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 4 } },
+    }),
+  });
+  const { usage } = await run({});
+  assert.deepEqual({ ...usage, cost: undefined }, { input: 6, output: 5, cacheRead: 4, cacheWrite: 0, totalTokens: 15, cost: undefined });
+  assert.ok(Math.abs(usage!.cost.total - (6 * 1 + 5 * 2 + 4 * 0.5) / 1e6) < 1e-12);
+});
 
 test("uses the registered API and serializes chat image, audio, and PDF inputs", async (t) => {
   const { run, requests, tool } = await fixture(t);

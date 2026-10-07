@@ -4,7 +4,7 @@ import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { truncateHead, withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FinishReason, GoogleGenAI, Modality, ResourceScope } from "@google/genai";
-import { StringEnum, type Api, type Model, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
+import { calculateCost, StringEnum, type Api, type Model, type OpenAICompletionsCompat, type Usage } from "@earendil-works/pi-ai";
 import OpenAI, { toFile } from "openai";
 import { Type } from "typebox";
 
@@ -60,7 +60,9 @@ type Request = {
   samplingParams?: Record<string, unknown>;
   signal?: AbortSignal;
 };
-type Answer = { text: string; status?: string };
+// Token counts as the provider reports them; cached input is not part of `input`.
+type Tokens = Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite">;
+type Answer = { text: string; status?: string; tokens?: Tokens };
 
 function generationApi(providerId: string, model: Model<Api> | undefined, providerModels: readonly Model<Api>[]): Api {
   if (model) return model.api;
@@ -121,6 +123,7 @@ async function callAnthropic(request: Request): Promise<Answer> {
     messages: [{ role: "user", content }],
     ...request.routing,
   }, { signal: request.signal }).finalMessage();
+  const { usage } = response;
   const status = response.stop_reason === "max_tokens"
     ? "response truncated (max_tokens)"
     : response.stop_reason === "refusal" ? "model refused the request" : undefined;
@@ -131,6 +134,7 @@ async function callAnthropic(request: Request): Promise<Answer> {
       .join("\n")
       .trim(),
     status,
+    tokens: { input: usage.input_tokens, output: usage.output_tokens, cacheRead: usage.cache_read_input_tokens ?? 0, cacheWrite: usage.cache_creation_input_tokens ?? 0 },
   };
 }
 
@@ -227,9 +231,11 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
       : choice?.finish_reason === "length"
         ? "response truncated (length)"
         : choice?.finish_reason === "content_filter" ? "response blocked by content filter" : undefined;
+    const cached = response.usage?.prompt_tokens_details?.cached_tokens ?? 0;
     return {
       text: response.choices.map((choice) => choice.message.content ?? choice.message.refusal ?? "").join("\n").trim(),
       status,
+      tokens: response.usage && { input: response.usage.prompt_tokens - cached, output: response.usage.completion_tokens, cacheRead: cached, cacheWrite: 0 },
     };
   }
 
@@ -265,7 +271,9 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
         ? (response.error?.message ? `response failed: ${response.error.message}` : "response failed")
         : response.status === "cancelled" ? "response cancelled" : undefined;
   const text = response.output_text ?? "";
-  return { text: text || refusal?.refusal || "", status };
+  const cached = response.usage?.input_tokens_details.cached_tokens ?? 0;
+  const tokens = response.usage && { input: response.usage.input_tokens - cached, output: response.usage.output_tokens, cacheRead: cached, cacheWrite: 0 };
+  return { text: text || refusal?.refusal || "", status, tokens };
 }
 
 async function callGoogle(request: Request): Promise<Answer | undefined> {
@@ -331,7 +339,12 @@ async function callGoogle(request: Request): Promise<Answer | undefined> {
   const status = finishReason
     ? finishReason === FinishReason.MAX_TOKENS ? "response truncated (MAX_TOKENS)" : `response stopped early (${finishReason})`
     : response.promptFeedback?.blockReason ? `prompt blocked (${response.promptFeedback.blockReason})` : undefined;
-  if (!request.output) return { text: response.text?.trim() ?? "", status };
+  const counts = response.usageMetadata;
+  const cached = counts?.cachedContentTokenCount ?? 0;
+  const tokens = counts && {
+    input: (counts.promptTokenCount ?? 0) - cached, output: (counts.candidatesTokenCount ?? 0) + (counts.thoughtsTokenCount ?? 0), cacheRead: cached, cacheWrite: 0,
+  };
+  if (!request.output) return { text: response.text?.trim() ?? "", status, tokens };
   let data: string | undefined;
   for (const candidate of response.candidates ?? []) {
     for (const part of candidate.content?.parts ?? []) data = part.inlineData?.data ?? data;
@@ -472,9 +485,16 @@ export default function (pi: ExtensionAPI): void {
         result = `${preview.content}\n\n[ask: response preview truncated. Full response: ${fullOutputPath}]`;
       }
       if (status) result = result ? `${result}\n\n[ask: ${status}]` : `[ask: ${status}]`;
+      // Pi adds a tool's usage to the session totals; only registered models have prices.
+      const tokens = answer?.tokens;
+      const usage = tokens && {
+        ...tokens, totalTokens: tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      };
+      if (model && usage) calculateCost(model, usage);
       return {
         content: [{ type: "text", text: output ? `Image saved to ${params.output}` : result }],
         details: { model: params.model, files: params.files ?? [], output: params.output, status, fullOutputPath },
+        usage: model && usage,
       };
     },
   });
