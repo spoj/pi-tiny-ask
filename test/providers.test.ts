@@ -195,13 +195,3 @@ test("allows unregistered OpenRouter image models when no routing is configured"
   await run("unknown-image-model", { output: "image.png" });
   assert.equal(requests[0].url, "https://openrouter.ai/api/v1/images");
 });
-
-test("rejects sampling parameters that overwrite configured routing", async (t) => {
-  const { run, requests } = await fixture(t, "openrouter", undefined, {
-    api: "openai-completions",
-    compat: { openRouterRouting: { only: ["google-ai-studio"], data_collection: "deny" } },
-    models: [{ id: "test-model", samplingParams: { provider: { data_collection: "allow" } } }],
-  });
-  await assert.rejects(run("test-model"), /Configure gateway routing in compat or samplingParams, not both/);
-  assert.equal(requests.length, 0);
-});

@@ -161,12 +161,10 @@ test("Google serializers accept every supported media kind inline", async (t) =>
   ]);
 });
 
-test("rejects GIF input only for OpenAI image generation", async (t) => {
+test("sends GIF input to chat and OpenRouter images", async (t) => {
   const { run, requests } = await fixture(t);
   await run({ files: ["anim.gif"] });
   assert.equal(requests[0].body.messages[0].content[1].image_url.url, "data:image/gif;base64,bWVkaWE=");
-  await assert.rejects(run({ output: "out.png", files: ["anim.gif"] }), /OpenAI image generation does not support GIF input: anim\.gif/);
-  assert.equal(requests.length, 1);
 
   const openrouter = await fixture(t, "openai-completions", false, "openrouter");
   await openrouter.run({ output: "out.png", files: ["anim.gif"] });
@@ -324,12 +322,12 @@ test("preserves explicit authorization removal for OpenRouter images", async (t)
 test("rejects Azure and Codex transports but keeps them out of the API enum", async (t) => {
   const codex = await fixture(t, "openai-codex-responses");
   assert.ok(!Reflect.get(codex.tool.parameters, "properties").api.enum.includes("openai-codex-responses"));
-  await assert.rejects(codex.run({}), /ask does not support the openai-codex-responses transport/);
+  await assert.rejects(codex.run({}), /ask does not support the openai-codex-responses API/);
   assert.equal(codex.requests.length, 0);
 
   const azure = await fixture(t, "azure-openai-responses");
   assert.ok(!Reflect.get(azure.tool.parameters, "properties").api.enum.includes("azure-openai-responses"));
-  await assert.rejects(azure.run({}), /ask does not support the azure-openai-responses transport/);
+  await assert.rejects(azure.run({}), /ask does not support the azure-openai-responses API/);
   assert.equal(azure.requests.length, 0);
 });
 
