@@ -99,10 +99,9 @@ async function callAnthropic(request: Request): Promise<Answer> {
   }
   // Anthropic OAuth requires the Claude Code identity as well as bearer auth.
   const oauth = request.apiKey?.includes("sk-ant-oat") ?? false;
-  const bearer = oauth || request.providerId === "github-copilot";
   const client = new Anthropic({
-    apiKey: bearer ? null : request.apiKey ?? "pi-auth",
-    authToken: bearer ? request.apiKey ?? null : null,
+    apiKey: oauth ? null : request.apiKey ?? "pi-auth",
+    authToken: oauth ? request.apiKey ?? null : null,
     baseURL: request.baseUrl,
     defaultHeaders: {
       ...(oauth ? {
@@ -186,12 +185,6 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
     const image = response.data?.[0];
     if (image?.b64_json) {
       await saveImage(request.output, Buffer.from(image.b64_json, "base64"));
-      return;
-    }
-    if (image?.url) {
-      const result = await fetch(image.url, { signal: request.signal });
-      if (!result.ok) throw new Error(`Image provider returned ${result.status} ${result.statusText}`);
-      await saveImage(request.output, Buffer.from(await result.arrayBuffer()));
       return;
     }
     throw new Error("Image provider returned no image");
@@ -414,14 +407,7 @@ export default function (pi: ExtensionAPI): void {
         if (unsupported) throw new Error(`OpenRouter images do not support configured routing option: ${unsupported}`);
       }
       const env = { ...process.env, ...resolved.env };
-      let baseUrl = resolved.baseUrl ?? model?.baseUrl ?? provider.baseUrl;
-      if (providerId === "cloudflare-ai-gateway" || providerId === "cloudflare-workers-ai") {
-        for (const name of ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID"]) {
-          if (!baseUrl?.includes(`{${name}}`)) continue;
-          if (!env[name]) throw new Error(`Provider endpoint requires ${name}`);
-          baseUrl = baseUrl.replaceAll(`{${name}}`, env[name]);
-        }
-      }
+      const baseUrl = resolved.baseUrl ?? model?.baseUrl ?? provider.baseUrl;
       const nativeVertex = !params.api && api === "google-vertex";
       if (!baseUrl && !nativeVertex) throw new Error(`Provider has no configured endpoint: ${providerId}`);
 
@@ -443,11 +429,7 @@ export default function (pi: ExtensionAPI): void {
         };
       }));
 
-      const headers: Record<string, string | null> = providerId === "github-copilot" ? {
-        "x-initiator": "agent",
-        "openai-intent": "conversation-edits",
-        ...(files.some((file) => file.kind === "image") ? { "copilot-vision-request": "true" } : {}),
-      } : {};
+      const headers: Record<string, string | null> = {};
       for (const [name, value] of Object.entries({ ...provider.headers, ...resolved.headers })) {
         headers[name.toLowerCase()] = value;
       }

@@ -105,27 +105,3 @@ test("OpenAI reference-image edits use multipart FormData", async (t) => {
   assert.deepEqual(Buffer.from(await uploaded.arrayBuffer()), reference);
   assert.deepEqual(await readFile(path.join(cwd, "edited.png")), generated);
 });
-
-test("OpenAI downloads URL image responses", async (t) => {
-  const image = Buffer.from("downloaded-image");
-  const imageUrl = "https://images.test/generated.png";
-  const { cwd, run } = await fixture(t, "openai", "gpt-image-2");
-  const requests: Request[] = [];
-  t.mock.method(globalThis, "fetch", async (input: string | Request, init?: RequestInit) => {
-    const request = new Request(input, init);
-    requests.push(request);
-    return request.url === imageUrl
-      ? new Response(image, { headers: { "content-type": "image/png" } })
-      : Response.json({ data: [{ url: imageUrl }] });
-  });
-
-  await run({ output: "downloaded.png" });
-
-  assert.deepEqual(requests.map((request) => request.url), [
-    "https://api.openai.com/v1/images/generations",
-    imageUrl,
-  ]);
-  assert.equal(requests[1].method, "GET");
-  assert.equal(requests[1].headers.get("authorization"), null);
-  assert.deepEqual(await readFile(path.join(cwd, "downloaded.png")), image);
-});
