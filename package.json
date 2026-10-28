@@ -9,9 +9,9 @@
     "check": "tsc --noEmit && npm test"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.123.0",
-    "@google/genai": "^1.52.0",
-    "openai": "^6.40.0"
+    "@anthropic-ai/sdk": "^0.137.0",
+    "@google/genai": "^2.31.0",
+    "openai": "^6.49.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
