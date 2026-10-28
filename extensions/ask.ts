@@ -253,16 +253,28 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
         image_url: dataUri(file),
       });
   }
-  const response = await client.responses.create({
+  // Sign in with ChatGPT accepts only unstored, streamed responses, streams events the SDK's stream helper rejects,
+  // and leaves the output out of the final response.
+  const stream = await client.responses.create({
     model: request.modelId,
     input: [{ role: "user", content }],
+    store: false,
+    stream: true,
     ...request.routing,
     ...request.samplingParams,
   }, { signal: request.signal });
-  const refusal = response.output
-    .filter((item) => item.type === "message")
-    .flatMap((item) => item.content)
-    .find((content) => content.type === "refusal");
+  const output: OpenAI.Responses.ResponseOutputItem[] = [];
+  let response: OpenAI.Responses.Response | undefined;
+  for await (const event of stream) {
+    if (event.type === "error") throw new Error(event.message);
+    if (event.type === "response.output_item.done") output.push(event.item);
+    if (event.type === "response.completed" || event.type === "response.incomplete" || event.type === "response.failed") {
+      response = event.response;
+    }
+  }
+  if (!response) throw new Error("Responses stream ended without a response");
+  const parts = output.filter((item) => item.type === "message").flatMap((item) => item.content);
+  const refusal = parts.find((part) => part.type === "refusal");
   const status = refusal
     ? "model refused the request"
     : response.status === "incomplete"
@@ -270,7 +282,7 @@ async function callOpenAI(request: Request): Promise<Answer | undefined> {
       : response.status === "failed"
         ? (response.error?.message ? `response failed: ${response.error.message}` : "response failed")
         : response.status === "cancelled" ? "response cancelled" : undefined;
-  const text = response.output_text ?? "";
+  const text = parts.flatMap((part) => (part.type === "output_text" ? [part.text] : [])).join("");
   const cached = response.usage?.input_tokens_details.cached_tokens ?? 0;
   const tokens = response.usage && { input: response.usage.input_tokens - cached, output: response.usage.output_tokens, cacheRead: cached, cacheWrite: 0 };
   return { text: text || refusal?.refusal || "", status, tokens };

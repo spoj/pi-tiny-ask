@@ -7,6 +7,7 @@ import { InMemoryCredentialStore, InMemoryModelsStore, type Credential } from "@
 import { ModelRegistry, ModelRuntime, type ExtensionAPI, type ExtensionToolContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import register from "../extensions/ask.ts";
 import { anthropicResponse } from "./anthropic-response.ts";
+import { responsesStream } from "./responses-stream.ts";
 
 async function fixture(
   t: TestContext,
@@ -33,9 +34,9 @@ async function fixture(
     const request = new Request(input, init);
     const body = await request.json();
     requests.push({ url: request.url, headers: request.headers, body });
+    if (request.url.endsWith("/responses")) return responsesStream();
     return body.stream ? anthropicResponse({ text: "ok" }) : Response.json({
       choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
-      output: [{ type: "message", content: [{ type: "output_text", text: "ok", annotations: [] }] }],
       data: [{ b64_json: Buffer.from("image").toString("base64") }],
     });
   });
@@ -73,6 +74,18 @@ test("uses resolved Anthropic OAuth as bearer auth with the required identity", 
   assert.match(requests[0].headers.get("anthropic-beta")!, /oauth-2025-04-20/);
   assert.match(requests[0].headers.get("user-agent")!, /^claude-cli\//);
   assert.equal(requests[0].body.system, "You are Claude Code, Anthropic's official CLI for Claude.");
+});
+
+test("sends Sign in with ChatGPT an unstored, streamed Responses request", async (t) => {
+  const { run, requests } = await fixture(t, "openai", {
+    type: "oauth", access: "chatgpt-access-token", refresh: "unused", expires: Date.now() + 3_600_000,
+  });
+  const result = await run("gpt-4o");
+  assert.equal(requests[0].url, "https://api.openai.com/v1/responses");
+  assert.equal(requests[0].headers.get("authorization"), "Bearer chatgpt-access-token");
+  assert.equal(requests[0].body.store, false);
+  assert.equal(requests[0].body.stream, true);
+  assert.deepEqual(result.content, [{ type: "text", text: "ok" }]);
 });
 
 for (const api of ["openai-completions", "openai-responses"]) {

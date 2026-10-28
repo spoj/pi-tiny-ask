@@ -6,6 +6,7 @@ import test, { type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import register from "../extensions/ask.ts";
 import { anthropicResponse } from "./anthropic-response.ts";
+import { responsesStream } from "./responses-stream.ts";
 
 type HeaderMap = Record<string, string | null>;
 type FixtureOptions = {
@@ -48,11 +49,10 @@ async function fixture(
     const request = new Request(input, init);
     requests.push({ url: request.url, headers: request.headers, body: await request.json() });
     if (options.respond) return options.respond(request);
+    if (request.url.endsWith("/responses")) return responsesStream();
     if (requests.at(-1)!.body.stream) return anthropicResponse({ text: "ok" });
     return Response.json({
-      object: "response",
       choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
-      output: [{ type: "message", content: [{ type: "output_text", text: "ok", annotations: [] }] }],
       content: [{ type: "text", text: "ok" }],
       candidates: [{ content: { parts: [{ text: "ok" }] } }],
       data: [{ b64_json: Buffer.from("image").toString("base64") }],
@@ -432,9 +432,8 @@ test("reports truncated and refused provider responses with an explicit status",
   assert.equal((chatResult.details as { status?: string }).status, "response truncated (length)");
 
   const responses = await fixture(t, "openai-responses", true, "custom", {
-    respond: () => Response.json({
-      id: "resp_1", object: "response", created_at: 0, status: "incomplete",
-      incomplete_details: { reason: "max_output_tokens" }, error: null, model: "test-model",
+    respond: () => responsesStream({
+      status: "incomplete", incomplete_details: { reason: "max_output_tokens" },
       output: [{
         type: "message", id: "msg_1", role: "assistant", status: "incomplete",
         content: [{ type: "output_text", text: "partial", annotations: [] }],
@@ -469,9 +468,7 @@ test("reports explicit model refusals", async (t) => {
   assert.match(textOf(chatResult), /\[ask: model refused the request\]/);
 
   const responses = await fixture(t, "openai-responses", true, "custom", {
-    respond: () => Response.json({
-      id: "resp_1", object: "response", created_at: 0, status: "completed",
-      incomplete_details: null, output_text: "", error: null, model: "test-model",
+    respond: () => responsesStream({
       output: [{
         type: "message", id: "msg_1", role: "assistant", status: "completed",
         content: [{ type: "refusal", refusal: "I can't help with that." }],
@@ -487,6 +484,15 @@ test("reports explicit model refusals", async (t) => {
   });
   const anthropicResult = await anthropic.run({ files: ["photo.png"] });
   assert.equal(textOf(anthropicResult), "[ask: model refused the request]");
+});
+
+test("reports Responses stream errors", async (t) => {
+  const { run } = await fixture(t, "openai-responses", true, "custom", {
+    respond: () => new Response(`event: error\ndata: ${JSON.stringify({ type: "error", message: "rate limited" })}\n\n`, {
+      headers: { "content-type": "text/event-stream" },
+    }),
+  });
+  await assert.rejects(run({}), /rate limited/);
 });
 
 test("does not retry Google SDK requests", async (t) => {
