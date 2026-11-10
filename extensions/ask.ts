@@ -361,7 +361,7 @@ async function callGoogle(request: Request): Promise<Answer | undefined> {
   for (const candidate of response.candidates ?? []) {
     for (const part of candidate.content?.parts ?? []) data = part.inlineData?.data ?? data;
   }
-  if (!data) throw new Error("Image provider returned no image");
+  if (!data) throw new Error(["Image provider returned no image", status, response.text?.trim()].filter(Boolean).join(": "));
   await saveImage(request.output, Buffer.from(data, "base64"));
 }
 

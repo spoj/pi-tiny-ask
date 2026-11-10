@@ -53,6 +53,18 @@ test("Google image generation saves inline output", async (t) => {
   assert.equal((result.content[0] as { text: string }).text, "Image saved to generated/google.png");
 });
 
+test("Google image generation reports why no image came back", async (t) => {
+  const { run } = await fixture(t, "google", "gemini-3.1-flash-image");
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    candidates: [{ content: { role: "model", parts: [{ text: "I can't draw that." }] }, finishReason: "IMAGE_SAFETY" }],
+  }));
+
+  await assert.rejects(
+    run({ output: "blocked.png" }),
+    { message: "Image provider returned no image: response stopped early (IMAGE_SAFETY): I can't draw that." },
+  );
+});
+
 test("Google Vertex image generation uses API-key auth and saves inline output", async (t) => {
   const image = Buffer.from("vertex-image");
   const { cwd, run } = await fixture(t, "google-vertex", "gemini-3.1-flash-image");
