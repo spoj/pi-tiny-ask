@@ -65,10 +65,13 @@ for (const modelId of ["claude-sonnet-4-5", "claude-opus-4-6"]) {
 
 test("uses resolved Anthropic OAuth as bearer auth with the required identity", async (t) => {
   const token = "sk-ant-oat-test-token";
-  const { run, requests } = await fixture(t, "anthropic", {
+  const { run, requests, modelRegistry } = await fixture(t, "anthropic", {
     type: "oauth", access: token, refresh: "unused", expires: Date.now() + 3_600_000,
   });
   await run("claude-sonnet-4-5", { files: ["photo.png"] });
+  // ask copies the Claude Code version that pi-ai keeps private, so compare it with Pi's own request.
+  await modelRegistry.complete(modelRegistry.find("anthropic", "claude-sonnet-4-5")!, { messages: [{ role: "user", content: "hi", timestamp: 0 }] });
+  assert.equal(requests[0].headers.get("user-agent"), requests[1].headers.get("user-agent"));
   assert.equal(requests[0].headers.get("authorization"), `Bearer ${token}`);
   assert.equal(requests[0].headers.get("x-api-key"), null);
   assert.match(requests[0].headers.get("anthropic-beta")!, /oauth-2025-04-20/);
