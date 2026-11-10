@@ -2,7 +2,7 @@
 
 A tiny pi extension that adds an `ask` tool for sending local media to another configured model or generating an image.
 
-The main agent chooses the model from behavioral guidance in `extensions/ask.ts`; there are no settings.
+The main agent chooses the model; there are no settings.
 
 ## Try it
 
