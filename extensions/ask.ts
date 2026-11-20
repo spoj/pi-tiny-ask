@@ -109,7 +109,7 @@ async function callAnthropic(request: Request): Promise<Answer> {
       ...(oauth ? {
         "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
         // Anthropic rejects OAuth requests for newer models from older Claude Code versions; track Pi's pi-ai.
-        "user-agent": "claude-cli/2.1.280",
+        "user-agent": "claude-cli/2.1.322",
         "x-app": "cli",
       } : {}),
       ...request.headers,
